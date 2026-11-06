@@ -294,8 +294,52 @@
   const UPLOAD_ERROR = 'ההעלאה נכשלה. בדקו את החיבור לאינטרנט ונסו שוב.';
   let blobClient = null;
 
+  function sendChunk(url, chunk, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (e) => onProgress(e.loaded);
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch { /* not json */ }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(Object.assign(new Error(data.error || UPLOAD_ERROR), { status: xhr.status }));
+      };
+      xhr.onerror = () => reject(new Error(UPLOAD_ERROR));
+      xhr.send(chunk);
+    });
+  }
+
+  // Google Drive: the file goes to the server in chunks, which passes them on.
+  async function putChunked(pathname, body, contentType, onProgress, name) {
+    const { chunkSize } = await api('/api/upload/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pathname, contentType, size: body.size, name }),
+    });
+    let offset = 0;
+    let failures = 0;
+    while (offset < body.size) {
+      const chunk = body.slice(offset, offset + chunkSize);
+      const url = `/api/upload/chunk?pathname=${encodeURIComponent(pathname)}&offset=${offset}`;
+      try {
+        const result = await sendChunk(url, chunk, (loaded) => onProgress(offset + loaded));
+        offset = result.received;
+        failures = 0;
+        if (result.done) return;
+      } catch (err) {
+        // Phones drop connections; try the same chunk again a few times.
+        failures += 1;
+        if (failures > 4 || (err.status >= 400 && err.status < 500)) throw err;
+        await new Promise((r) => setTimeout(r, 1000 * 2 ** failures));
+      }
+    }
+  }
+
   // Uploads go from the browser straight to storage; the server only grants permission.
-  async function putFile(pathname, body, contentType, onProgress) {
+  async function putFile(pathname, body, contentType, onProgress, name) {
+    if (state.uploadMode === 'chunked') return putChunked(pathname, body, contentType, onProgress, name || pathname.split('/').pop());
     if (state.uploadMode === 'local') {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -350,6 +394,10 @@
     const type = mime && mime.split('/')[0];
     if (!type) {
       showError(composeError, `סוג הקובץ לא נתמך: ${file.name}`);
+      return;
+    }
+    if (!file.size) {
+      showError(composeError, `הקובץ ${file.name} ריק.`);
       return;
     }
     if (file.size > state.maxFileMB * 1024 * 1024) {
@@ -497,7 +545,7 @@
           mime: a.mime,
           size: a.file.size,
         };
-        uploads.push({ pathname: meta.pathname, body: a.file, mime: a.mime });
+        uploads.push({ pathname: meta.pathname, body: a.file, mime: a.mime, name: a.file.name });
         const preview = a.type === 'image' ? await imagePreview(a.file)
           : a.type === 'video' ? await videoPoster(a.file) : null;
         if (preview) {
@@ -513,7 +561,7 @@
         await putFile(u.pathname, u.body, u.mime, (loaded) => {
           const f = Math.min(1, (sent + loaded) / total);
           setProgress(f, `${Math.round(f * 100)}%`);
-        });
+        }, u.name);
         sent += u.body.size;
       }
       setProgress(1, 'שומר…');

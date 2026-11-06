@@ -26,7 +26,6 @@ const config = {
 const MAX_FILE_BYTES = config.maxFileMB * 1024 * 1024;
 const COVER_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
-const storage = createStorage(process.env);
 // The Neon integration may add a prefix to its variables (e.g. STORAGE_DATABASE_URL).
 const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL
   || Object.entries(process.env).find(([k, v]) => /(^|_)(DATABASE_URL|POSTGRES_URL)$/.test(k) && v)?.[1];
@@ -34,6 +33,7 @@ const db = createDb({
   connectionString: databaseUrl,
   defaultName: config.defaultName,
 });
+const storage = createStorage(process.env, { db });
 const auth = createAuth({
   adminCode: config.adminCode, familyCode: config.familyCode, secret: process.env.SESSION_SECRET,
 });
@@ -90,7 +90,10 @@ const publicSettings = (s) => ({
   coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
 });
 
-const pathsOf = (post) => post.files.flatMap((f) => [f.pathname, f.previewPathname].filter(Boolean));
+// Where a file lives in storage: a Drive file id, or the upload path for Blob/disk.
+const refOf = (f) => f.ref || f.pathname;
+const previewRefOf = (f) => f.previewRef || f.previewPathname;
+const refsOf = (post) => post.files.flatMap((f) => [refOf(f), f.previewPathname && previewRefOf(f)].filter(Boolean));
 
 function requireRole(check) {
   return (req, res, next) => (check(req.role) ? next() : res.status(403).json({ error: 'אין הרשאה' }));
@@ -180,6 +183,7 @@ app.get('/api/state', async (req, res) => {
     loginEnabled: auth.enabled,
     maxFileMB: config.maxFileMB,
     uploadMode: storage.uploadMode,
+    chunkSize: storage.chunkSize || null,
     uploadTypes: UPLOAD_TYPES,
     settings: publicSettings(settings),
     posts: posts.map(serializePost),
@@ -222,6 +226,44 @@ app.put('/api/local-upload', uploadLimiter, async (req, res) => {
   }
 });
 
+// Google Drive: the browser sends files in chunks through the server.
+app.post('/api/upload/start', uploadLimiter, express.json({ limit: '8kb' }), async (req, res) => {
+  if (!storage.startUpload) return res.status(404).json({ error: 'לא נמצא' });
+  const { pathname, contentType, size, name } = req.body || {};
+  let rules;
+  try {
+    rules = uploadRules(String(pathname || ''), req.role);
+  } catch {
+    return res.status(403).json({ error: 'אין הרשאה' });
+  }
+  const mime = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (!rules.contentTypes.includes(mime)) return res.status(415).json({ error: 'סוג הקובץ לא נתמך.' });
+  const total = Number(size);
+  if (!Number.isInteger(total) || total <= 0) return res.status(400).json({ error: 'הקובץ ריק.' });
+  if (total > rules.maxBytes) return res.status(413).json({ error: 'קובץ גדול מדי.' });
+  try {
+    await storage.startUpload({ pathname, mime, total, name: safeFileName(name, pathname.split('/').pop()) });
+    res.json({ chunkSize: storage.chunkSize });
+  } catch (err) {
+    console.error('Upload start failed:', err.message);
+    res.status(err.status === 409 ? 409 : 502).json({ error: 'ההעלאה נכשלה. נסו שוב.' });
+  }
+});
+
+app.put('/api/upload/chunk', uploadLimiter, express.raw({ type: () => true, limit: '5mb' }), async (req, res) => {
+  if (!storage.putChunk) return res.status(404).json({ error: 'לא נמצא' });
+  const offset = Number(req.query.offset);
+  if (!Number.isInteger(offset) || offset < 0 || !Buffer.isBuffer(req.body)) {
+    return res.status(400).json({ error: 'בקשה לא תקינה' });
+  }
+  try {
+    res.json(await storage.putChunk({ pathname: String(req.query.pathname || ''), offset, data: req.body }));
+  } catch (err) {
+    console.error('Upload chunk failed:', err.message);
+    res.status(err.status && err.status < 500 ? err.status : 502).json({ error: 'ההעלאה נכשלה. נסו שוב.' });
+  }
+});
+
 // ----- media -----
 
 async function sendMedia(req, res, preview) {
@@ -229,8 +271,8 @@ async function sendMedia(req, res, preview) {
   const file = post && post.files.find((f) => f.id === req.params.fileId);
   if (!file || !canSee(req, post) || (preview && !file.previewPathname)) return res.status(404).end();
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");
-  if (preview) return storage.send(req, res, file.previewPathname, 'image/jpeg');
-  return storage.send(req, res, file.pathname, file.mime);
+  if (preview) return storage.send(req, res, previewRefOf(file), 'image/jpeg');
+  return storage.send(req, res, refOf(file), file.mime);
 }
 app.get('/media/:postId/:fileId', (req, res) => sendMedia(req, res, false));
 app.get('/media/:postId/:fileId/preview', (req, res) => sendMedia(req, res, true));
@@ -239,7 +281,7 @@ app.get('/cover', async (req, res) => {
   const { cover } = await db.getSettings();
   if (!cover) return res.status(404).end();
   try {
-    const stream = await storage.openRead(cover.pathname);
+    const stream = await storage.openRead(cover.ref || cover.pathname);
     res.set('Content-Type', cover.mime);
     // Versioned URL (?v=), so the CDN may keep it; link previews fetch it without signing in.
     res.set('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
@@ -288,7 +330,16 @@ app.post('/api/posts', rateLimit({ windowMs: 60 * 60 * 1000, max: 300 }), expres
   }
   if (!text && files.length === 0) return res.status(400).json({ error: 'נא להוסיף טקסט או קובץ.' });
 
-  const post = { id: draftId, createdAt: new Date().toISOString(), name, text, visibility, files };
+  if (await db.getPost(draftId)) return res.status(409).json({ error: 'הפריט כבר נשמר.' });
+  const post = { id: draftId, createdAt: new Date().toISOString(), name, text, visibility, files, storage: {} };
+  if (storage.finalizePost) {
+    try {
+      await storage.finalizePost(post);
+    } catch (err) {
+      console.error('Could not file the post in storage:', err.message);
+      return res.status(err.status === 400 ? 400 : 502).json({ error: 'השמירה נכשלה. נסו שוב.' });
+    }
+  }
   if (!(await db.insertPost(post))) return res.status(409).json({ error: 'הפריט כבר נשמר.' });
   res.status(201).json({ post: serializePost(await db.getPost(post.id)) });
 });
@@ -297,13 +348,17 @@ app.patch('/api/posts/:id', requireAdmin, express.json({ limit: '4kb' }), async 
   const visibility = req.body?.visibility === 'family' ? 'family' : 'public';
   const post = await db.setVisibility(req.params.id, visibility);
   if (!post) return res.status(404).json({ error: 'לא נמצא' });
+  if (storage.onPostChanged) {
+    await storage.onPostChanged(post).catch((err) => console.error('Could not rename in storage:', err.message));
+  }
   res.json({ post: serializePost(post) });
 });
 
 app.delete('/api/posts/:id', requireAdmin, async (req, res) => {
   const post = await db.deletePost(req.params.id);
   if (!post) return res.status(404).json({ error: 'לא נמצא' });
-  await storage.remove(pathsOf(post)).catch((err) => console.error('Could not delete files:', err));
+  const removal = storage.removePost ? storage.removePost(post) : storage.remove(refsOf(post));
+  await removal.catch((err) => console.error('Could not delete files:', err));
   res.json({ ok: true });
 });
 
@@ -334,12 +389,20 @@ app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (r
     const pathname = String(body.coverPathname);
     if (!COVER_PATH_RE.test(pathname)) return res.status(400).json({ error: 'בקשה לא תקינה' });
     const ext = pathname.slice(pathname.lastIndexOf('.') + 1);
-    changes.cover = { pathname, mime: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`, v: Date.now() };
+    let ref = pathname;
+    if (storage.resolveUpload) {
+      try {
+        ref = await storage.resolveUpload(pathname);
+      } catch {
+        return res.status(400).json({ error: 'העלאת התמונה לא הושלמה.' });
+      }
+    }
+    changes.cover = { pathname, ref, mime: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`, v: Date.now() };
   } else if (body.removeCover) {
     changes.cover = null;
   }
   const settings = await db.updateSettings(changes);
-  if (old && 'cover' in changes) storage.remove([old.pathname]).catch(() => {});
+  if (old && 'cover' in changes) storage.remove([old.ref || old.pathname]).catch(() => {});
   res.json({ settings: publicSettings(settings) });
 });
 
