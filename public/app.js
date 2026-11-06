@@ -62,28 +62,14 @@
     return data;
   }
 
-  function uploadForm(url, formData, onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', url);
-      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
-      xhr.onload = () => {
-        let data = {};
-        try { data = JSON.parse(xhr.responseText); } catch { /* not json */ }
-        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-        else reject(new Error(data.error || 'השליחה נכשלה. נסו שוב.'));
-      };
-      xhr.onerror = () => reject(new Error('השליחה נכשלה. בדקו את החיבור לאינטרנט ונסו שוב.'));
-      xhr.send(formData);
-    });
-  }
-
   // ---------- state ----------
 
   const state = {
     role: 'guest',
     loginEnabled: false,
     maxFileMB: 2048,
+    uploadMode: 'local',
+    uploadTypes: [],
     settings: { name: '', subtitle: '', coverUrl: null },
     posts: [],
     filter: 'all',
@@ -276,19 +262,71 @@
   let uploading = false;
   let attachmentSeq = 0;
 
-  const EXT_KIND = {
-    jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image', heic: 'image', heif: 'image', avif: 'image',
-    mp4: 'video', m4v: 'video', mov: 'video', webm: 'video', '3gp': 'video', mkv: 'video',
-    mp3: 'audio', m4a: 'audio', aac: 'audio', wav: 'audio', ogg: 'audio', oga: 'audio', opus: 'audio',
-    amr: 'audio', flac: 'audio', weba: 'audio',
+  const EXT_MIME = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+    avif: 'image/avif', heic: 'image/heic', heif: 'image/heif',
+    mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', '3gp': 'video/3gpp',
+    mkv: 'video/x-matroska',
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg',
+    opus: 'audio/ogg', amr: 'audio/amr', flac: 'audio/flac', weba: 'audio/webm',
   };
+  const MIME_EXT = {};
+  for (const [ext, mime] of Object.entries(EXT_MIME)) if (!MIME_EXT[mime]) MIME_EXT[mime] = ext;
+  Object.assign(MIME_EXT, { 'audio/webm': 'weba', 'audio/x-m4a': 'm4a', 'audio/x-wav': 'wav', 'audio/wave': 'wav' });
 
-  function kindOf(file) {
-    const major = (file.type || '').split('/')[0];
-    if (file.type === 'image/svg+xml') return null;
-    if (major === 'image' || major === 'video' || major === 'audio') return major;
-    const ext = (/\.([a-z0-9]+)$/i.exec(file.name) || [])[1];
-    return ext ? EXT_KIND[ext.toLowerCase()] || null : null;
+  /** The storage content type for a file, or null when it is not a photo, video or audio file. */
+  function uploadMime(file) {
+    const type = (file.type || '').split(';')[0].trim().toLowerCase();
+    if (state.uploadTypes.includes(type)) return type;
+    const ext = ((/\.([a-z0-9]+)$/i.exec(file.name) || [])[1] || '').toLowerCase();
+    const byExt = EXT_MIME[ext];
+    if (!byExt || !state.uploadTypes.includes(byExt)) return null;
+    // A webm/ogg recording reported as audio stays audio.
+    if (type.startsWith('audio/') && byExt.startsWith('video/')) return state.uploadTypes.includes('audio/webm') ? 'audio/webm' : null;
+    return byExt;
+  }
+
+  function randomId() {
+    const bytes = crypto.getRandomValues(new Uint8Array(12));
+    return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_');
+  }
+
+  const UPLOAD_ERROR = 'ההעלאה נכשלה. בדקו את החיבור לאינטרנט ונסו שוב.';
+  let blobClient = null;
+
+  // Uploads go from the browser straight to storage; the server only grants permission.
+  async function putFile(pathname, body, contentType, onProgress) {
+    if (state.uploadMode === 'local') {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', `/api/local-upload?pathname=${encodeURIComponent(pathname)}`);
+        xhr.setRequestHeader('Content-Type', contentType);
+        xhr.upload.onprogress = (e) => onProgress(e.loaded);
+        xhr.onload = () => {
+          let data = {};
+          try { data = JSON.parse(xhr.responseText); } catch { /* not json */ }
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(data.error || UPLOAD_ERROR));
+        };
+        xhr.onerror = () => reject(new Error(UPLOAD_ERROR));
+        xhr.send(body);
+      });
+    }
+    blobClient ??= import('/vendor/blob-client.js');
+    const { upload, uploadPresigned } = await blobClient;
+    const send = state.uploadMode === 'presigned' ? uploadPresigned : upload;
+    try {
+      await send(pathname, body, {
+        access: 'private',
+        handleUploadUrl: '/api/upload',
+        contentType,
+        multipart: body.size > 64 * 1024 * 1024,
+        onUploadProgress: (e) => onProgress(e.loaded),
+      });
+    } catch (err) {
+      console.error('Upload failed:', err);
+      throw new Error(UPLOAD_ERROR);
+    }
   }
 
   $('#open-compose').addEventListener('click', () => {
@@ -308,7 +346,8 @@
   });
 
   function addAttachment(file) {
-    const type = kindOf(file);
+    const mime = uploadMime(file);
+    const type = mime && mime.split('/')[0];
     if (!type) {
       showError(composeError, `סוג הקובץ לא נתמך: ${file.name}`);
       return;
@@ -318,7 +357,7 @@
       return;
     }
     const url = type === 'image' || type === 'audio' ? URL.createObjectURL(file) : null;
-    attachments.push({ id: ++attachmentSeq, file, type, url });
+    attachments.push({ id: ++attachmentSeq, file, type, mime, url });
     renderAttachments();
   }
 
@@ -447,19 +486,42 @@
     setUploading(true);
     setProgress(0, 'מכין…');
     try {
-      const form = new FormData();
-      form.append('name', name);
-      form.append('text', text);
-      form.append('visibility', visibility);
+      const draftId = randomId();
+      const uploads = [];
+      const files = [];
       for (const [i, a] of attachments.entries()) {
-        form.append('file', a.file, a.file.name);
+        const meta = {
+          pathname: `media/${draftId}/${i}.${MIME_EXT[a.mime] || 'bin'}`,
+          previewPathname: null,
+          name: a.file.name,
+          mime: a.mime,
+          size: a.file.size,
+        };
+        uploads.push({ pathname: meta.pathname, body: a.file, mime: a.mime });
         const preview = a.type === 'image' ? await imagePreview(a.file)
           : a.type === 'video' ? await videoPoster(a.file) : null;
-        if (preview) form.append(`preview_${i}`, preview, 'preview.jpg');
+        if (preview) {
+          meta.previewPathname = `media/${draftId}/${i}.preview.jpg`;
+          uploads.push({ pathname: meta.previewPathname, body: preview, mime: 'image/jpeg' });
+        }
+        files.push(meta);
       }
 
-      const { post } = await uploadForm('/api/posts', form, (f) => {
-        setProgress(f, f < 1 ? `${Math.round(f * 100)}%` : 'שומר…');
+      const total = uploads.reduce((sum, u) => sum + u.body.size, 0) || 1;
+      let sent = 0;
+      for (const u of uploads) {
+        await putFile(u.pathname, u.body, u.mime, (loaded) => {
+          const f = Math.min(1, (sent + loaded) / total);
+          setProgress(f, `${Math.round(f * 100)}%`);
+        });
+        sent += u.body.size;
+      }
+      setProgress(1, 'שומר…');
+
+      const { post } = await api('/api/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draftId, name, text, visibility, files }),
       });
 
       if (name) store.set('memorial:name', name);
@@ -634,26 +696,50 @@
     const button = e.submitter || $('#settings-form button[type="submit"]');
     button.disabled = true;
     try {
+      const changes = { name: $('#s-name').value, subtitle: $('#s-subtitle').value };
+      if (pendingCover) {
+        const resized = await imagePreview(pendingCover);
+        const body = resized || pendingCover;
+        const mime = resized ? 'image/jpeg' : uploadMime(pendingCover);
+        const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[mime];
+        if (!ext) throw new Error('נא לבחור תמונה בפורמט JPG או PNG.');
+        changes.coverPathname = `cover/${randomId()}.${ext}`;
+        await putFile(changes.coverPathname, body, mime, () => {});
+      } else if (removeCover) {
+        changes.removeCover = true;
+      }
       await api('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: $('#s-name').value, subtitle: $('#s-subtitle').value }),
+        body: JSON.stringify(changes),
       });
-      if (pendingCover) {
-        const form = new FormData();
-        const resized = await imagePreview(pendingCover);
-        if (resized) form.append('cover', resized, 'cover.jpg');
-        else form.append('cover', pendingCover, pendingCover.name);
-        await uploadForm('/api/cover', form, () => {});
-      } else if (removeCover) {
-        await api('/api/cover', { method: 'DELETE' });
-      }
       await load();
       settingsDialog.close();
     } catch (err) {
       showError($('#settings-error'), err.message);
     } finally {
       button.disabled = false;
+    }
+  });
+
+  // ---------- download everything ----------
+
+  const exportDialog = $('#export');
+
+  $('#export-open').addEventListener('click', async () => {
+    try {
+      const { parts } = await api('/api/export', { cache: 'no-store' });
+      if (parts.length === 1) {
+        location.href = parts[0].url;
+        return;
+      }
+      $('#export-parts').replaceChildren(...parts.map((part) => h('li', null,
+        h('a', { class: 'btn secondary', href: part.url },
+          `חלק ${part.number} מתוך ${parts.length}`),
+        h('span', { class: 'att-size' }, fmtSize(part.bytes)))));
+      exportDialog.showModal();
+    } catch (err) {
+      alert(err.message);
     }
   });
 

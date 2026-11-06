@@ -5,17 +5,20 @@
   "description": "Memorial page for sharing stories, photos, recordings and videos",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "bundle": "esbuild scripts/blob-client-entry.js --bundle --format=esm --platform=browser --minify --legal-comments=none --outfile=public/vendor/blob-client.js"
   },
   "engines": {
     "node": ">=20.12"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1163.0",
-    "@aws-sdk/lib-storage": "^3.1163.0",
-    "@aws-sdk/s3-request-presigner": "^3.1163.0",
+    "@vercel/blob": "^2.8.2",
+    "@vercel/functions": "^3.11.0",
     "archiver": "^7.0.1",
-    "busboy": "^1.6.0",
-    "express": "^5.3.0"
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

@@ -1,5 +1,7 @@
 'use strict';
 
+// Runs on Vercel (exported Express app) or locally (`npm start`).
+
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -8,30 +10,56 @@ const express = require('express');
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env file */ }
 
 const { createStorage } = require('./lib/storage');
-const { createStore } = require('./lib/store');
+const { createDb } = require('./lib/db');
 const { createAuth, canSeeFamily } = require('./lib/auth');
-const { receive } = require('./lib/upload');
-const { streamArchive } = require('./lib/archive');
-const { classify, cleanText, safeFileName } = require('./lib/media');
+const { streamArchive, splitIntoParts } = require('./lib/archive');
+const { classify, cleanText, safeFileName, UPLOAD_TYPES } = require('./lib/media');
 
 const config = {
   port: Number(process.env.PORT) || 3000,
   adminCode: (process.env.ADMIN_CODE || '').trim(),
   familyCode: (process.env.FAMILY_CODE || '').trim(),
-  maxFileMB: Number(process.env.MAX_FILE_MB) || 2048,
+  maxFileMB: Number(process.env.MAX_FILE_MB) || 1024,
   defaultName: (process.env.PERSON_NAME || 'רני אלון').trim(),
+  exportPartMB: Number(process.env.EXPORT_PART_MB) || 250,
 };
 const MAX_FILE_BYTES = config.maxFileMB * 1024 * 1024;
+const COVER_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const storage = createStorage(process.env);
-const store = createStore(storage, { name: config.defaultName });
+// The Neon integration may add a prefix to its variables (e.g. STORAGE_DATABASE_URL).
+const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL
+  || Object.entries(process.env).find(([k, v]) => /(^|_)(DATABASE_URL|POSTGRES_URL)$/.test(k) && v)?.[1];
+const db = createDb({
+  connectionString: databaseUrl,
+  defaultName: config.defaultName,
+});
 const auth = createAuth({
   adminCode: config.adminCode, familyCode: config.familyCode, secret: process.env.SESSION_SECRET,
 });
 
+const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const newId = () => crypto.randomBytes(12).toString('base64url');
-const sizeLabel = (mb) => (mb >= 1024 ? `${Math.round(mb / 1024 * 10) / 10}GB` : `${mb}MB`);
-const tooLargeMessage = `קובץ גדול מדי. הגודל המרבי לקובץ: ${sizeLabel(config.maxFileMB)}.`;
+
+// Upload paths the browser may ask for:
+//   media/<16-char draft id>/<n>.<ext>          a file of a new post
+//   media/<16-char draft id>/<n>.preview.jpg    its smaller copy / video poster
+//   cover/<16-char id>.<jpg|png|webp>            the portrait (admin only)
+const MEDIA_PATH_RE = /^media\/([A-Za-z0-9_-]{16})\/(\d{1,3})(\.preview\.jpg|\.[a-z0-9]{1,5})$/;
+const COVER_PATH_RE = /^cover\/[A-Za-z0-9_-]{16}\.(jpg|png|webp)$/;
+
+function uploadRules(pathname, role) {
+  const media = MEDIA_PATH_RE.exec(pathname);
+  if (media) {
+    return media[3] === '.preview.jpg'
+      ? { contentTypes: ['image/jpeg'], maxBytes: 20 * 1024 * 1024 }
+      : { contentTypes: UPLOAD_TYPES, maxBytes: MAX_FILE_BYTES };
+  }
+  if (COVER_PATH_RE.test(pathname) && role === 'admin') {
+    return { contentTypes: COVER_TYPES, maxBytes: 40 * 1024 * 1024 };
+  }
+  throw Object.assign(new Error('Upload path not allowed'), { status: 403 });
+}
 
 // ---------- helpers ----------
 
@@ -51,21 +79,18 @@ function serializePost(post) {
       name: f.name,
       size: f.size,
       url: `/media/${post.id}/${f.id}`,
-      previewUrl: f.previewKey ? `/media/${post.id}/${f.id}/preview` : null,
+      previewUrl: f.previewPathname ? `/media/${post.id}/${f.id}/preview` : null,
     })),
   };
 }
 
-function publicSettings() {
-  const s = store.settings();
-  return {
-    name: s.name,
-    subtitle: s.subtitle,
-    coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
-  };
-}
+const publicSettings = (s) => ({
+  name: s.name,
+  subtitle: s.subtitle,
+  coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
+});
 
-const keysOf = (post) => post.files.flatMap((f) => [f.key, f.previewKey].filter(Boolean));
+const pathsOf = (post) => post.files.flatMap((f) => [f.pathname, f.previewPathname].filter(Boolean));
 
 function requireRole(check) {
   return (req, res, next) => (check(req.role) ? next() : res.status(403).json({ error: 'אין הרשאה' }));
@@ -73,14 +98,12 @@ function requireRole(check) {
 const requireAdmin = requireRole((r) => r === 'admin');
 const requireFamily = requireRole(canSeeFamily);
 
+// Per server instance only (Vercel may run several); enough to slow down abuse.
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of hits) if (entry.reset < now) hits.delete(key);
-  }, windowMs).unref();
   return (req, res, next) => {
     const now = Date.now();
+    if (hits.size > 5000) for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
     let entry = hits.get(req.ip);
     if (!entry || entry.reset < now) {
       entry = { count: 0, reset: now + windowMs };
@@ -92,19 +115,25 @@ function rateLimit({ windowMs, max }) {
   };
 }
 
-// index.html with the name, photo and Open Graph tags filled in (so links
-// shared on WhatsApp etc. show the name and photo).
-const indexTemplate = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-const assetVersion = crypto.createHash('sha1')
-  .update(fs.readFileSync(path.join(__dirname, 'public', 'app.js')))
-  .update(fs.readFileSync(path.join(__dirname, 'public', 'style.css')))
-  .digest('hex').slice(0, 10);
+// The page, with name, portrait and link-preview tags filled in on the server.
+const indexTemplate = require('./lib/page');
+const assetVersion = (() => {
+  // Changes whenever app.js / style.css change, so browsers fetch the new ones.
+  try {
+    return crypto.createHash('sha1')
+      .update(fs.readFileSync(path.join(__dirname, 'public', 'app.js')))
+      .update(fs.readFileSync(path.join(__dirname, 'public', 'style.css')))
+      .digest('hex').slice(0, 10);
+  } catch {
+    return (process.env.VERCEL_GIT_COMMIT_SHA || process.env.VERCEL_DEPLOYMENT_ID || String(Date.now())).slice(0, 10);
+  }
+})();
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
-function renderIndex(req) {
-  const s = publicSettings();
+function renderIndex(req, settings) {
+  const s = publicSettings(settings);
   const origin = `${req.protocol}://${req.get('host')}`;
   const ogImage = s.coverUrl ? `<meta property="og:image" content="${escapeHtml(origin + s.coverUrl)}">` : '';
   return indexTemplate
@@ -131,44 +160,89 @@ app.use(auth.middleware);
 
 app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
-app.get(['/', '/index.html'], (req, res) => {
+app.get(['/', '/index.html'], async (req, res) => {
+  const settings = await db.getSettings();
   res.set('Cache-Control', 'no-cache');
-  res.type('html').send(renderIndex(req));
+  res.type('html').send(renderIndex(req, settings));
 });
 
+// On Vercel the CDN serves public/; this is for local runs.
 app.use(express.static(path.join(__dirname, 'public'), { index: false, maxAge: '7d' }));
 
-app.get('/api/state', (req, res) => {
+app.get('/api/state', async (req, res) => {
+  const [settings, posts] = await Promise.all([
+    db.getSettings(),
+    db.listPosts({ includeFamily: canSeeFamily(req.role) }),
+  ]);
   res.set('Cache-Control', 'no-store');
   res.json({
     role: req.role,
     loginEnabled: auth.enabled,
     maxFileMB: config.maxFileMB,
-    settings: publicSettings(),
-    posts: store.posts().filter((p) => canSee(req, p)).map(serializePost),
+    uploadMode: storage.uploadMode,
+    uploadTypes: UPLOAD_TYPES,
+    settings: publicSettings(settings),
+    posts: posts.map(serializePost),
   });
+});
+
+// ----- uploads (browser → storage directly) -----
+
+const uploadLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 1500 });
+
+app.post('/api/upload', uploadLimiter, express.json({ limit: '64kb' }), async (req, res) => {
+  if (!storage.handleUploadRequest) return res.status(404).json({ error: 'לא נמצא' });
+  try {
+    const result = await storage.handleUploadRequest(req, {
+      authorize: (pathname) => uploadRules(pathname, req.role),
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.status !== 403) console.error('Upload permission failed:', err);
+    res.status(err.status || 400).json({ error: 'ההעלאה נכשלה. נסו שוב.' });
+  }
+});
+
+app.put('/api/local-upload', uploadLimiter, async (req, res) => {
+  if (!storage.saveUpload) return res.status(404).json({ error: 'לא נמצא' });
+  const pathname = String(req.query.pathname || '');
+  let rules;
+  try {
+    rules = uploadRules(pathname, req.role);
+  } catch {
+    return res.status(403).json({ error: 'אין הרשאה' });
+  }
+  const mime = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (!rules.contentTypes.includes(mime)) return res.status(415).json({ error: 'סוג הקובץ לא נתמך.' });
+  try {
+    res.json({ pathname: await storage.saveUpload(req, pathname, rules.maxBytes) });
+  } catch (err) {
+    if (!req.complete && !err.status) return; // visitor left mid-upload
+    res.status(err.status === 413 ? 413 : err.status === 409 ? 409 : 500).json({ error: 'ההעלאה נכשלה. נסו שוב.' });
+  }
 });
 
 // ----- media -----
 
 async function sendMedia(req, res, preview) {
-  const post = store.get(req.params.postId);
+  const post = await db.getPost(req.params.postId);
   const file = post && post.files.find((f) => f.id === req.params.fileId);
-  if (!file || !canSee(req, post) || (preview && !file.previewKey)) return res.status(404).end();
+  if (!file || !canSee(req, post) || (preview && !file.previewPathname)) return res.status(404).end();
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");
-  if (preview) return storage.send(req, res, file.previewKey, 'image/jpeg');
-  return storage.send(req, res, file.key, file.mime);
+  if (preview) return storage.send(req, res, file.previewPathname, 'image/jpeg');
+  return storage.send(req, res, file.pathname, file.mime);
 }
 app.get('/media/:postId/:fileId', (req, res) => sendMedia(req, res, false));
 app.get('/media/:postId/:fileId/preview', (req, res) => sendMedia(req, res, true));
 
 app.get('/cover', async (req, res) => {
-  const cover = store.settings().cover;
+  const { cover } = await db.getSettings();
   if (!cover) return res.status(404).end();
   try {
-    const stream = await storage.openRead(cover.key);
+    const stream = await storage.openRead(cover.pathname);
     res.set('Content-Type', cover.mime);
-    res.set('Cache-Control', 'public, max-age=86400');
+    // Versioned URL (?v=), so the CDN may keep it; link previews fetch it without signing in.
+    res.set('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
     stream.on('error', () => res.destroy());
     stream.pipe(res);
   } catch {
@@ -178,78 +252,58 @@ app.get('/cover', async (req, res) => {
 
 // ----- posts -----
 
-app.post('/api/posts', rateLimit({ windowMs: 60 * 60 * 1000, max: 300 }), async (req, res) => {
-  const postId = newId();
+app.post('/api/posts', rateLimit({ windowMs: 60 * 60 * 1000, max: 300 }), express.json({ limit: '256kb' }), async (req, res) => {
+  const body = req.body || {};
+  const draftId = String(body.draftId || '');
+  if (!ID_RE.test(draftId)) return res.status(400).json({ error: 'בקשה לא תקינה' });
+
+  const name = cleanText(body.name, 80);
+  const text = cleanText(body.text, 20000);
+  const visibility = body.visibility === 'family' ? 'family' : 'public';
+  const inputFiles = Array.isArray(body.files) ? body.files.slice(0, 80) : [];
+
   const files = [];
-
-  const result = await receive(req, storage, {
-    fileSize: MAX_FILE_BYTES,
-    maxFiles: 80,
-    tooLargeMessage,
-    onFile(field, stream, info, ctx) {
-      if (field === 'file') {
-        const kind = classify(info.mimeType, info.filename);
-        if (!kind) {
-          ctx.fail(415, `סוג הקובץ לא נתמך: ${safeFileName(info.filename, '')}`.trim());
-          stream.resume();
-          return;
-        }
-        const meta = {
-          id: newId(), key: '', type: kind.type, mime: kind.mime,
-          name: safeFileName(info.filename, `file${kind.ext}`), size: 0, previewKey: null,
-        };
-        meta.key = `media/${postId}/${meta.id}${kind.ext}`;
-        files.push(meta);
-        ctx.save(stream, meta.key, meta.mime).then((size) => { meta.size = size; }, () => {});
-        return;
+  for (const f of inputFiles) {
+    const m = MEDIA_PATH_RE.exec(String(f.pathname || ''));
+    if (!m || m[1] !== draftId || m[3] === '.preview.jpg') return res.status(400).json({ error: 'בקשה לא תקינה' });
+    const kind = classify(f.mime, f.pathname);
+    if (!kind) return res.status(415).json({ error: 'סוג הקובץ לא נתמך.' });
+    let previewPathname = null;
+    if (f.previewPathname) {
+      const p = MEDIA_PATH_RE.exec(String(f.previewPathname));
+      if (!p || p[1] !== draftId || p[2] !== m[2] || p[3] !== '.preview.jpg' || kind.type === 'audio') {
+        return res.status(400).json({ error: 'בקשה לא תקינה' });
       }
-      // A smaller JPEG made in the browser: image preview or video poster.
-      const m = /^preview_(\d+)$/.exec(field);
-      const target = m && files[Number(m[1])];
-      if (target && !target.previewKey && target.type !== 'audio' && /^image\/jpeg$/i.test(info.mimeType)) {
-        target.previewKey = `media/${postId}/${target.id}.preview.jpg`;
-        ctx.save(stream, target.previewKey, 'image/jpeg').catch(() => {});
-        return;
-      }
-      stream.resume();
-    },
-  });
-
-  const name = cleanText(result.fields.name, 80);
-  const text = cleanText(result.fields.text, 20000);
-  const visibility = result.fields.visibility === 'family' ? 'family' : 'public';
-  let error = result.error;
-  if (!error && !text && files.length === 0) error = { status: 400, message: 'נא להוסיף טקסט או קובץ.' };
-
-  if (error) {
-    storage.remove(result.keys).catch(() => {});
-    return res.status(error.status).json({ error: error.message });
+      previewPathname = f.previewPathname;
+    }
+    files.push({
+      id: newId(),
+      pathname: f.pathname,
+      previewPathname,
+      type: kind.type,
+      mime: kind.mime,
+      name: safeFileName(f.name, `file${kind.ext}`),
+      size: Math.max(0, Math.min(Number(f.size) || 0, MAX_FILE_BYTES)),
+    });
   }
+  if (!text && files.length === 0) return res.status(400).json({ error: 'נא להוסיף טקסט או קובץ.' });
 
-  const post = { id: postId, createdAt: new Date().toISOString(), name, text, visibility, files };
-  try {
-    await store.addPost(post);
-  } catch (err) {
-    console.error('Could not save post:', err);
-    storage.remove(result.keys).catch(() => {});
-    return res.status(500).json({ error: 'השמירה נכשלה. נסו שוב.' });
-  }
-  res.status(201).json({ post: serializePost(post) });
+  const post = { id: draftId, createdAt: new Date().toISOString(), name, text, visibility, files };
+  if (!(await db.insertPost(post))) return res.status(409).json({ error: 'הפריט כבר נשמר.' });
+  res.status(201).json({ post: serializePost(await db.getPost(post.id)) });
 });
 
 app.patch('/api/posts/:id', requireAdmin, express.json({ limit: '4kb' }), async (req, res) => {
-  const post = store.get(req.params.id);
-  if (!post) return res.status(404).json({ error: 'לא נמצא' });
   const visibility = req.body?.visibility === 'family' ? 'family' : 'public';
-  const updated = await store.updatePost(post.id, { visibility });
-  res.json({ post: serializePost(updated) });
+  const post = await db.setVisibility(req.params.id, visibility);
+  if (!post) return res.status(404).json({ error: 'לא נמצא' });
+  res.json({ post: serializePost(post) });
 });
 
 app.delete('/api/posts/:id', requireAdmin, async (req, res) => {
-  const post = store.get(req.params.id);
+  const post = await db.deletePost(req.params.id);
   if (!post) return res.status(404).json({ error: 'לא נמצא' });
-  await store.removePost(post.id);
-  storage.remove(keysOf(post)).catch((err) => console.error('Could not delete files:', err));
+  await storage.remove(pathsOf(post)).catch((err) => console.error('Could not delete files:', err));
   res.json({ ok: true });
 });
 
@@ -270,56 +324,53 @@ app.post('/api/logout', (req, res) => {
 // ----- page settings (admin) -----
 
 app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (req, res) => {
-  const name = cleanText(req.body?.name, 120) || config.defaultName;
-  const subtitle = cleanText(req.body?.subtitle, 200);
-  await store.updateSettings({ name, subtitle });
-  res.json({ settings: publicSettings() });
-});
-
-app.post('/api/cover', requireAdmin, async (req, res) => {
-  let cover = null;
-  const result = await receive(req, storage, {
-    fileSize: 40 * 1024 * 1024,
-    maxFiles: 1,
-    tooLargeMessage: 'התמונה גדולה מדי.',
-    onFile(field, stream, info, ctx) {
-      const kind = field === 'cover' && classify(info.mimeType, info.filename);
-      if (!kind || !['image/jpeg', 'image/png', 'image/webp'].includes(kind.mime)) {
-        ctx.fail(415, 'נא לבחור תמונה בפורמט JPG או PNG.');
-        stream.resume();
-        return;
-      }
-      cover = { key: `cover/${newId()}${kind.ext}`, mime: kind.mime, v: Date.now() };
-      ctx.save(stream, cover.key, cover.mime).catch(() => {});
-    },
-  });
-  if (result.error || !cover) {
-    storage.remove(result.keys).catch(() => {});
-    return res.status(result.error?.status || 400).json({ error: result.error?.message || 'לא נבחרה תמונה.' });
+  const body = req.body || {};
+  const changes = {
+    name: cleanText(body.name, 120) || config.defaultName,
+    subtitle: cleanText(body.subtitle, 200),
+  };
+  const old = (await db.getSettings()).cover;
+  if (body.coverPathname) {
+    const pathname = String(body.coverPathname);
+    if (!COVER_PATH_RE.test(pathname)) return res.status(400).json({ error: 'בקשה לא תקינה' });
+    const ext = pathname.slice(pathname.lastIndexOf('.') + 1);
+    changes.cover = { pathname, mime: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`, v: Date.now() };
+  } else if (body.removeCover) {
+    changes.cover = null;
   }
-  const old = store.settings().cover;
-  await store.updateSettings({ cover });
-  if (old) storage.remove([old.key]).catch(() => {});
-  res.json({ settings: publicSettings() });
+  const settings = await db.updateSettings(changes);
+  if (old && 'cover' in changes) storage.remove([old.pathname]).catch(() => {});
+  res.json({ settings: publicSettings(settings) });
 });
 
-app.delete('/api/cover', requireAdmin, async (req, res) => {
-  const old = store.settings().cover;
-  await store.updateSettings({ cover: null });
-  if (old) storage.remove([old.key]).catch(() => {});
-  res.json({ settings: publicSettings() });
-});
+// ----- download everything (family and admin), in parts -----
 
-// ----- download everything (family and admin) -----
+async function exportParts() {
+  const posts = (await db.listPosts({ includeFamily: true })).reverse(); // oldest first
+  const parts = splitIntoParts(posts, config.exportPartMB * 1024 * 1024);
+  return parts.length ? parts : [{ firstIndex: 0, posts: [], size: 0 }];
+}
 
 app.get('/api/export', requireFamily, async (req, res) => {
-  const settings = store.settings();
-  const fileName = `${safeFileName(settings.name, 'memorial')}.zip`;
+  const parts = await exportParts();
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    parts: parts.map((p, i) => ({ number: i + 1, url: `/api/export/${i + 1}`, posts: p.posts.length, bytes: p.size })),
+  });
+});
+
+app.get('/api/export/:part', requireFamily, async (req, res) => {
+  const [parts, settings] = await Promise.all([exportParts(), db.getSettings()]);
+  const n = Number(req.params.part);
+  const part = parts[n - 1];
+  if (!Number.isInteger(n) || !part) return res.status(404).json({ error: 'לא נמצא' });
+  const base = safeFileName(settings.name, 'memorial');
+  const fileName = parts.length > 1 ? `${base} - ${n} of ${parts.length}.zip` : `${base}.zip`;
   res.set('Content-Type', 'application/zip');
-  res.set('Content-Disposition', `attachment; filename="memorial.zip"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  res.set('Content-Disposition', `attachment; filename="memorial-${n}.zip"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
   res.set('Cache-Control', 'no-store');
   try {
-    await streamArchive(res, storage, store.posts(), settings);
+    await streamArchive(res, storage, part, settings, { includeCover: n === 1 });
   } catch (err) {
     console.error('Export failed:', err);
     res.destroy(err);
@@ -334,19 +385,21 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: 'אירעה שגיאה. נסו שוב.' });
 });
 
-// ---------- start ----------
+if (process.env.VERCEL && storage.kind === 'local') {
+  console.error('No file storage configured: connect a Vercel Blob store (private) to this project.');
+}
+if (!config.adminCode) console.warn('ADMIN_CODE is not set: nobody can delete posts or change the page.');
+if (!config.familyCode) console.warn('FAMILY_CODE is not set: family-only posts are visible to the admin only.');
 
-async function start() {
-  await storage.init();
-  await store.load();
-  if (!config.adminCode) console.warn('ADMIN_CODE is not set: nobody can delete posts or change the page.');
-  if (!config.familyCode) console.warn('FAMILY_CODE is not set: family-only posts are visible to the admin only.');
-  app.listen(config.port, () => {
-    console.log(`Memorial site listening on port ${config.port} (storage: ${storage.description}, ${store.posts().length} posts)`);
+module.exports = app;
+
+if (require.main === module) {
+  Promise.all([storage.init(), db.init()]).then(() => {
+    app.listen(config.port, () => {
+      console.log(`Memorial site on http://localhost:${config.port} (storage: ${storage.description})`);
+    });
+  }).catch((err) => {
+    console.error('Could not start:', err);
+    process.exit(1);
   });
 }
-
-start().catch((err) => {
-  console.error('Could not start:', err);
-  process.exit(1);
-});
