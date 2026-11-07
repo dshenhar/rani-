@@ -39,6 +39,7 @@
     video: () => svg(['M3 6h12v12H3z', 'M15 10l6-3v10l-6-3']),
     audio: () => svg(['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M5 11a7 7 0 0 0 14 0', 'M12 18v3']),
     image: () => svg(['M3 5h18v14H3z', 'M3 16l5-5 4 4 3-3 6 6']),
+    edit: () => svg(['M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4z', 'M13.5 6.5l4 4']),
   };
 
   const dateFormat = new Intl.DateTimeFormat('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -52,6 +53,15 @@
   const store = {
     get(key) { try { return localStorage.getItem(key); } catch { return null; } },
     set(key, value) { try { localStorage.setItem(key, value); } catch { /* ignore */ } },
+    remove(key) { try { localStorage.removeItem(key); } catch { /* ignore */ } },
+  };
+
+  // Who may edit is decided by the server (a cookie set when posting). The key is
+  // also kept here only to offer a link for editing from another device.
+  const editKeys = {
+    get: (postId) => store.get(`memorial:edit:${postId}`),
+    set: (postId, key) => store.set(`memorial:edit:${postId}`, key),
+    remove: (postId) => store.remove(`memorial:edit:${postId}`),
   };
 
   async function api(url, options = {}) {
@@ -62,12 +72,21 @@
     return data;
   }
 
+  let toastTimer = null;
+  function toast(message) {
+    const el = $('#toast');
+    el.textContent = message;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+  }
+
   // ---------- state ----------
 
   const state = {
     role: 'guest',
     loginEnabled: false,
-    maxFileMB: 2048,
+    maxFileMB: 1024,
     uploadMode: 'local',
     uploadTypes: [],
     settings: { name: '', subtitle: '', coverUrl: null },
@@ -97,6 +116,8 @@
     renderFeed();
     renderFooter();
   }
+
+  const canEdit = (post) => Boolean(post.canEdit);
 
   // ---------- header ----------
 
@@ -189,17 +210,28 @@
       h('span', null, label));
   }
 
+  // One photo: shown whole. Several: a strip you swipe through, with a counter.
   function renderImages(images) {
-    const grid = h('div', { class: `gallery n${Math.min(images.length, 3)}` });
-    images.forEach((file, i) => {
+    const slides = images.map((file, i) => {
       const img = h('img', { src: file.previewUrl || file.url, alt: '', loading: 'lazy', decoding: 'async' });
       const button = h('button', {
-        type: 'button', class: 'thumb', 'aria-label': 'הגדלת התמונה', onclick: () => openLightbox(images, i),
+        type: 'button', class: 'slide', 'aria-label': `תמונה ${i + 1} מתוך ${images.length}`,
+        onclick: () => openLightbox(images, i),
       }, img);
       img.addEventListener('error', () => button.replaceWith(fileTile(file, 'הורדת התמונה')), { once: true });
-      grid.append(button);
+      return button;
     });
-    return grid;
+    if (images.length === 1) return h('div', { class: 'gallery single' }, slides);
+
+    const strip = h('div', { class: 'strip' }, slides);
+    const counter = h('span', { class: 'counter' }, `1 / ${images.length}`);
+    const dots = h('div', { class: 'dots', 'aria-hidden': 'true' }, images.map((_, i) => h('span', { class: i ? '' : 'on' })));
+    strip.addEventListener('scroll', () => {
+      const i = Math.round(Math.abs(strip.scrollLeft) / strip.clientWidth);
+      counter.textContent = `${i + 1} / ${images.length}`;
+      [...dots.children].forEach((d, j) => d.classList.toggle('on', j === i));
+    }, { passive: true });
+    return h('div', { class: 'gallery many' }, strip, counter, dots);
   }
 
   function renderVideo(file) {
@@ -221,48 +253,27 @@
   function renderPost(post) {
     const byType = (t) => post.files.filter((f) => f.type === t);
     const images = byType('image');
-    const isAdmin = state.role === 'admin';
-
-    return h('article', { class: 'card', 'data-id': post.id },
-      h('header', { class: 'card-head' },
-        post.name ? h('span', { class: 'author' }, post.name) : null,
-        h('time', { datetime: post.createdAt }, fmtDate(post.createdAt)),
-        post.visibility === 'family' ? h('span', { class: 'badge' }, icons.lock(), 'משפחה בלבד') : null),
-      post.text ? h('p', { class: 'text' }, post.text) : null,
+    const media = [
       images.length ? renderImages(images) : null,
-      byType('video').map(renderVideo),
-      byType('audio').map(renderAudio),
-      isAdmin ? h('div', { class: 'card-admin' },
-        h('button', { type: 'button', class: 'link', onclick: () => toggleVisibility(post) },
-          post.visibility === 'family' ? 'להציג לכולם' : 'להעביר למשפחה בלבד'),
-        h('button', { type: 'button', class: 'link danger', onclick: () => deletePost(post) }, 'מחיקה')) : null);
-  }
+      ...byType('video').map(renderVideo),
+      ...byType('audio').map(renderAudio),
+    ].filter(Boolean);
+    const classes = ['card'];
+    if (media.length) classes.push('has-media');
+    if (post.text) classes.push('has-text');
 
-  async function toggleVisibility(post) {
-    try {
-      const visibility = post.visibility === 'family' ? 'public' : 'family';
-      const { post: updated } = await api(`/api/posts/${post.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visibility }),
-      });
-      state.posts = state.posts.map((p) => (p.id === updated.id ? updated : p));
-      renderFeed();
-    } catch (err) {
-      alert(err.message);
-    }
-  }
-
-  async function deletePost(post) {
-    if (!confirm('למחוק את הפריט? לא ניתן לשחזר.')) return;
-    try {
-      await api(`/api/posts/${post.id}`, { method: 'DELETE' });
-      state.posts = state.posts.filter((p) => p.id !== post.id);
-      renderFilters();
-      renderFeed();
-    } catch (err) {
-      alert(err.message);
-    }
+    return h('article', { class: classes.join(' '), 'data-id': post.id },
+      h('header', { class: 'card-head' },
+        h('div', { class: 'who' },
+          post.name ? h('span', { class: 'author' }, post.name) : null,
+          h('time', { datetime: post.createdAt }, fmtDate(post.createdAt)),
+          post.visibility === 'family' ? h('span', { class: 'badge' }, icons.lock(), 'משפחה בלבד') : null),
+        canEdit(post) ? h('button', {
+          type: 'button', class: 'edit-btn', onclick: () => openEditor(post),
+        }, icons.edit(), 'עריכה') : null),
+      h('div', { class: 'card-body' },
+        media.length ? h('div', { class: 'card-media' }, media) : null,
+        post.text ? h('p', { class: 'text' }, post.text) : null));
   }
 
   // ---------- dialogs (shared) ----------
@@ -270,19 +281,17 @@
   for (const dialog of document.querySelectorAll('dialog')) {
     dialog.addEventListener('click', (e) => {
       if (e.target.closest('[data-close]')) { dialog.close(); return; }
-      if (e.target === dialog && !dialog.classList.contains('lightbox')) {
-        // Click on the backdrop (outside the form) closes small dialogs only.
-        if (dialog.classList.contains('small')) dialog.close();
-      }
+      if (e.target === dialog && dialog.classList.contains('small')) dialog.close();
     });
   }
 
   function showError(el, message) {
     el.textContent = message || '';
     el.hidden = !message;
+    if (message) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
-  // ---------- compose ----------
+  // ---------- adding and editing a memory ----------
 
   const compose = $('#compose');
   const composeForm = $('#compose-form');
@@ -290,7 +299,9 @@
   const fileInput = $('#f-files');
   const attachmentList = $('#attachments');
   const submitButton = $('#compose-submit');
-  const attachments = [];
+  // New files: { id, file, type, mime, url }. Files already in an edited post: { id, existing, removed }.
+  let attachments = [];
+  let editing = null; // the post being edited, or null when adding a new one
   let uploading = false;
   let attachmentSeq = 0;
 
@@ -344,10 +355,10 @@
   }
 
   // Google Drive: the file goes to the server in chunks, which passes them on.
-  async function putChunked(pathname, body, contentType, onProgress, name) {
+  async function putChunked(pathname, body, contentType, onProgress, name, headers) {
     const { chunkSize } = await api('/api/upload/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ pathname, contentType, size: body.size, name }),
     });
     let offset = 0;
@@ -370,13 +381,16 @@
   }
 
   // Uploads go from the browser straight to storage; the server only grants permission.
-  async function putFile(pathname, body, contentType, onProgress, name) {
-    if (state.uploadMode === 'chunked') return putChunked(pathname, body, contentType, onProgress, name || pathname.split('/').pop());
+  async function putFile(pathname, body, contentType, onProgress, { name, headers = {} } = {}) {
+    if (state.uploadMode === 'chunked') {
+      return putChunked(pathname, body, contentType, onProgress, name || pathname.split('/').pop(), headers);
+    }
     if (state.uploadMode === 'local') {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('PUT', `/api/local-upload?pathname=${encodeURIComponent(pathname)}`);
         xhr.setRequestHeader('Content-Type', contentType);
+        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
         xhr.upload.onprogress = (e) => onProgress(e.loaded);
         xhr.onload = () => {
           let data = {};
@@ -396,6 +410,7 @@
         access: 'private',
         handleUploadUrl: '/api/upload',
         contentType,
+        headers,
         multipart: body.size > 64 * 1024 * 1024,
         onUploadProgress: (e) => onProgress(e.loaded),
       });
@@ -405,15 +420,46 @@
     }
   }
 
-  $('#open-compose').addEventListener('click', () => {
-    showError(composeError, '');
-    const savedName = store.get('memorial:name');
-    if (savedName && !$('#f-name').value) $('#f-name').value = savedName;
-    compose.showModal();
-  });
+  function resetComposer() {
+    for (const a of attachments) if (a.url && !a.existing) URL.revokeObjectURL(a.url);
+    attachments = [];
+    editing = null;
+    $('#f-text').value = '';
+    composeForm.querySelector('input[value="public"]').checked = true;
+    renderAttachments();
+  }
 
+  function openComposer(post) {
+    showError(composeError, '');
+    if (post) {
+      // Editing: fill in what the post has now.
+      resetComposer();
+      editing = post;
+      $('#f-name').value = post.name || '';
+      $('#f-text').value = post.text || '';
+      composeForm.querySelector(`input[value="${post.visibility}"]`).checked = true;
+      attachments = post.files.map((f) => ({ id: ++attachmentSeq, existing: f, removed: false }));
+      renderAttachments();
+    } else {
+      if (editing) resetComposer(); // leave edit mode; keep a draft of a new memory otherwise
+      const savedName = store.get('memorial:name');
+      if (savedName && !$('#f-name').value) $('#f-name').value = savedName;
+    }
+    $('#compose-title').textContent = post ? 'עריכת זיכרון' : 'הוספת זיכרון';
+    submitButton.textContent = post ? 'שמירה' : 'שליחה';
+    $('#edit-extras').hidden = !post;
+    $('#copy-edit-link').hidden = !(post && editKeys.get(post.id));
+    compose.showModal();
+  }
+
+  const openEditor = (post) => openComposer(post);
+
+  $('#open-compose').addEventListener('click', () => openComposer(null));
   compose.addEventListener('cancel', (e) => { if (uploading) e.preventDefault(); });
-  compose.addEventListener('close', () => { if (recorder) stopRecording(); });
+  compose.addEventListener('close', () => {
+    if (recorder) stopRecording();
+    if (editing && !uploading) resetComposer();
+  });
 
   fileInput.addEventListener('change', () => {
     showError(composeError, '');
@@ -442,31 +488,47 @@
   }
 
   function removeAttachment(id) {
-    const i = attachments.findIndex((a) => a.id === id);
-    if (i < 0) return;
-    if (attachments[i].url) URL.revokeObjectURL(attachments[i].url);
-    attachments.splice(i, 1);
+    const a = attachments.find((x) => x.id === id);
+    if (!a) return;
+    if (a.existing) {
+      a.removed = !a.removed; // existing files can be put back until saving
+    } else {
+      if (a.url) URL.revokeObjectURL(a.url);
+      attachments = attachments.filter((x) => x.id !== id);
+    }
     renderAttachments();
   }
 
   function renderAttachments() {
     attachmentList.replaceChildren(...attachments.map((a) => {
-      const thumb = h('span', { class: 'att-thumb' },
-        a.type === 'image' ? h('img', { src: a.url, alt: '' }) : icons[a.type]());
+      const existing = a.existing;
+      const type = existing ? existing.type : a.type;
+      const name = existing ? existing.name : a.file.name;
+      const size = existing ? existing.size : a.file.size;
+      const src = existing ? (existing.previewUrl || (type === 'image' ? existing.url : null)) : a.url;
+      const thumb = h('span', { class: 'att-thumb' });
+      if (type === 'image' || (existing && existing.previewUrl)) {
+        const img = h('img', { src, alt: '' });
+        img.addEventListener('error', () => img.replaceWith(icons[type]()), { once: true });
+        thumb.append(img);
+      } else {
+        thumb.append(icons[type]());
+      }
       const info = h('span', { class: 'att-info' },
-        h('span', { class: 'att-name' }, a.file.name),
-        h('span', { class: 'att-size' }, fmtSize(a.file.size)),
-        a.type === 'audio' ? h('audio', { controls: true, preload: 'metadata', src: a.url }) : null);
-      return h('li', null, thumb, info,
+        h('span', { class: 'att-name' }, name),
+        h('span', { class: 'att-size' }, a.removed ? 'יוסר בשמירה' : size ? fmtSize(size) : ''),
+        type === 'audio' && !a.removed ? h('audio', { controls: true, preload: 'metadata', src: existing ? existing.url : a.url }) : null);
+      return h('li', { class: a.removed ? 'removed' : '' }, thumb, info,
         h('button', {
-          type: 'button', class: 'icon-btn', 'aria-label': `הסרת ${a.file.name}`,
+          type: 'button', class: 'icon-btn',
+          'aria-label': a.removed ? `החזרת ${name}` : `הסרת ${name}`,
           disabled: uploading, onclick: () => removeAttachment(a.id),
-        }, '×'));
+        }, a.removed ? '↺' : '×'));
     }));
   }
 
   // Smaller copies made in the browser: they load fast in the page, while the
-  // original files are kept for the family's download.
+  // original files are kept for the family.
   async function imagePreview(file) {
     const simple = /^image\/(jpeg|png|webp)$/.test(file.type);
     if (file.type === 'image/gif' || (simple && file.size < 350 * 1024)) return null;
@@ -483,7 +545,7 @@
       bitmap.close?.();
       return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
     } catch {
-      return null;
+      return null; // e.g. iPhone photos in Chrome; the server makes the copy instead
     }
   }
 
@@ -549,6 +611,56 @@
     if (uploading || recorder) { e.preventDefault(); e.returnValue = ''; }
   });
 
+  /** Uploads new attachments as files number `firstIndex`, `firstIndex + 1`, ... of post `postId`. */
+  async function uploadNew(postId, newOnes, firstIndex, headers) {
+    const uploads = [];
+    const files = [];
+    for (const [i, a] of newOnes.entries()) {
+      const n = firstIndex + i;
+      const meta = {
+        pathname: `media/${postId}/${n}.${MIME_EXT[a.mime] || 'bin'}`,
+        previewPathname: null,
+        name: a.file.name,
+        mime: a.mime,
+        size: a.file.size,
+      };
+      uploads.push({ pathname: meta.pathname, body: a.file, mime: a.mime, name: a.file.name });
+      const preview = a.type === 'image' ? await imagePreview(a.file)
+        : a.type === 'video' ? await videoPoster(a.file) : null;
+      if (preview) {
+        meta.previewPathname = `media/${postId}/${n}.preview.jpg`;
+        uploads.push({ pathname: meta.previewPathname, body: preview, mime: 'image/jpeg' });
+      }
+      files.push(meta);
+    }
+    const total = uploads.reduce((sum, u) => sum + u.body.size, 0) || 1;
+    let sent = 0;
+    for (const u of uploads) {
+      await putFile(u.pathname, u.body, u.mime, (loaded) => {
+        const f = Math.min(1, (sent + loaded) / total);
+        setProgress(f, `${Math.round(f * 100)}%`);
+      }, { name: u.name, headers });
+      sent += u.body.size;
+    }
+    return files;
+  }
+
+  function showPost(post, { scroll }) {
+    const visible = post.visibility === 'public' || state.role !== 'guest' || post.canEdit;
+    const i = state.posts.findIndex((p) => p.id === post.id);
+    if (!visible) state.posts = state.posts.filter((p) => p.id !== post.id);
+    else if (i >= 0) state.posts[i] = post;
+    else state.posts = [post, ...state.posts];
+    state.filter = 'all';
+    renderFilters();
+    renderFeed();
+    const card = visible && $(`.card[data-id="${post.id}"]`);
+    if (card) {
+      card.classList.add('fresh');
+      if (scroll) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
   composeForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (uploading) return;
@@ -558,75 +670,82 @@
     const name = $('#f-name').value.trim();
     const text = $('#f-text').value.trim();
     const visibility = composeForm.querySelector('input[name="visibility"]:checked')?.value || 'public';
-    if (!text && !attachments.length) {
-      showError(composeError, 'נא לכתוב טקסט או לצרף קובץ.');
+    const newOnes = attachments.filter((a) => !a.existing);
+    const keptOld = attachments.filter((a) => a.existing && !a.removed);
+    if (!text && !newOnes.length && !keptOld.length) {
+      showError(composeError, editing ? 'לא נשאר טקסט או קובץ. אפשר למחוק את הזיכרון.' : 'נא לכתוב טקסט או לצרף קובץ.');
       return;
     }
 
     setUploading(true);
     setProgress(0, 'מכין…');
     try {
-      const draftId = randomId();
-      const uploads = [];
-      const files = [];
-      for (const [i, a] of attachments.entries()) {
-        const meta = {
-          pathname: `media/${draftId}/${i}.${MIME_EXT[a.mime] || 'bin'}`,
-          previewPathname: null,
-          name: a.file.name,
-          mime: a.mime,
-          size: a.file.size,
-        };
-        uploads.push({ pathname: meta.pathname, body: a.file, mime: a.mime, name: a.file.name });
-        const preview = a.type === 'image' ? await imagePreview(a.file)
-          : a.type === 'video' ? await videoPoster(a.file) : null;
-        if (preview) {
-          meta.previewPathname = `media/${draftId}/${i}.preview.jpg`;
-          uploads.push({ pathname: meta.previewPathname, body: preview, mime: 'image/jpeg' });
-        }
-        files.push(meta);
+      let post;
+      if (editing) {
+        const addFiles = await uploadNew(editing.id, newOnes, editing.nextIndex, {});
+        setProgress(1, 'שומר…');
+        ({ post } = await api(`/api/posts/${editing.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name, text, visibility, addFiles,
+            removeFiles: attachments.filter((a) => a.existing && a.removed).map((a) => a.existing.id),
+          }),
+        }));
+      } else {
+        const draftId = randomId();
+        const files = await uploadNew(draftId, newOnes, 0, {});
+        setProgress(1, 'שומר…');
+        const result = await api('/api/posts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ draftId, name, text, visibility, files }),
+        });
+        post = result.post;
+        if (result.editKey) editKeys.set(post.id, result.editKey);
+        if (name) store.set('memorial:name', name);
       }
-
-      const total = uploads.reduce((sum, u) => sum + u.body.size, 0) || 1;
-      let sent = 0;
-      for (const u of uploads) {
-        await putFile(u.pathname, u.body, u.mime, (loaded) => {
-          const f = Math.min(1, (sent + loaded) / total);
-          setProgress(f, `${Math.round(f * 100)}%`);
-        }, u.name);
-        sent += u.body.size;
-      }
-      setProgress(1, 'שומר…');
-
-      const { post } = await api('/api/posts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ draftId, name, text, visibility, files }),
-      });
-
-      if (name) store.set('memorial:name', name);
-      for (const a of attachments) if (a.url) URL.revokeObjectURL(a.url);
-      attachments.length = 0;
-      renderAttachments();
-      $('#f-text').value = '';
-      composeForm.querySelector('input[value="public"]').checked = true;
+      const wasEditing = Boolean(editing);
       setUploading(false);
+      resetComposer();
       compose.close();
-
-      if (post.visibility === 'public' || state.role !== 'guest') {
-        state.posts = [post, ...state.posts];
-        state.filter = 'all';
-        renderFilters();
-        renderFeed();
-        const card = $(`.card[data-id="${post.id}"]`);
-        if (card) {
-          card.classList.add('fresh');
-          card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-      }
+      showPost(post, { scroll: !wasEditing });
+      if (wasEditing) toast('השינויים נשמרו');
     } catch (err) {
       setUploading(false);
       showError(composeError, err.message);
+    }
+  });
+
+  $('#delete-post').addEventListener('click', async () => {
+    if (!editing || !confirm('למחוק את הזיכרון? לא ניתן לשחזר.')) return;
+    try {
+      await api(`/api/posts/${editing.id}`, { method: 'DELETE' });
+      editKeys.remove(editing.id);
+      state.posts = state.posts.filter((p) => p.id !== editing.id);
+      resetComposer();
+      compose.close();
+      renderFilters();
+      renderFeed();
+      toast('הזיכרון נמחק');
+    } catch (err) {
+      showError(composeError, err.message);
+    }
+  });
+
+  // A link that lets the author edit from another phone or computer.
+  $('#copy-edit-link').addEventListener('click', async () => {
+    if (!editing) return;
+    const link = `${location.origin}/?edit=${encodeURIComponent(`${editing.id}~${editKeys.get(editing.id)}`)}`;
+    try {
+      if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+        await navigator.share({ url: link });
+      } else {
+        await navigator.clipboard.writeText(link);
+        toast('הקישור הועתק');
+      }
+    } catch {
+      prompt('הקישור לעריכה:', link);
     }
   });
 
@@ -873,20 +992,38 @@
   // ---------- start ----------
 
   async function start() {
-    // A link of the form https://site/?k=CODE signs family members in directly.
+    // ?k=CODE signs family members in; ?edit=POST~KEY lets an author edit from another device.
     const params = new URLSearchParams(location.search);
     const code = params.get('k');
+    const editLink = params.get('edit');
     state.driveFlash = params.get('drive');
-    if (code || state.driveFlash) {
-      params.delete('k');
-      params.delete('drive');
+    if (code || editLink || state.driveFlash) {
+      for (const p of ['k', 'edit', 'drive']) params.delete(p);
       const rest = params.toString();
       history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : '') + location.hash);
     }
-    if (code) {
-      try { await signIn(code); return; } catch { /* fall through to a normal load */ }
+    let editId = null;
+    if (editLink && editLink.includes('~')) {
+      const [id, key] = editLink.split('~');
+      try {
+        await api('/api/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, key }),
+        });
+        editKeys.set(id, key);
+        editId = id;
+      } catch (err) {
+        toast(err.message);
+      }
     }
-    await load();
+    let signedIn = false;
+    if (code) {
+      try { await signIn(code); signedIn = true; } catch { /* fall through to a normal load */ }
+    }
+    if (!signedIn) await load();
+    const post = editId && state.posts.find((p) => p.id === editId);
+    if (post) openEditor(post);
   }
 
   start().catch(() => {
