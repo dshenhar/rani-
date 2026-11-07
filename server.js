@@ -29,11 +29,22 @@ const COVER_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 // The Neon integration may add a prefix to its variables (e.g. STORAGE_DATABASE_URL).
 const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL
   || Object.entries(process.env).find(([k, v]) => /(^|_)(DATABASE_URL|POSTGRES_URL)$/.test(k) && v)?.[1];
-const db = createDb({
-  connectionString: databaseUrl,
-  defaultName: config.defaultName,
-});
-const storage = createStorage(process.env, { db });
+// Until the deployment is fully configured the site shows what is missing
+// instead of failing (see setupPage below).
+const setupProblems = [];
+if (!databaseUrl) setupProblems.push('db');
+const db = databaseUrl ? createDb({ connectionString: databaseUrl, defaultName: config.defaultName }) : null;
+let storage;
+try {
+  storage = createStorage(process.env, { db });
+} catch (err) {
+  console.error('Storage settings:', err.message);
+  setupProblems.push('storage-config');
+  storage = { kind: 'none', description: 'not configured' };
+}
+if (process.env.VERCEL && storage.kind === 'local') setupProblems.push('storage');
+if (storage.oauth && !process.env.GOOGLE_OAUTH_CLIENT_SECRET) setupProblems.push('oauth-secret');
+if (!config.adminCode) setupProblems.push('admin-code');
 const auth = createAuth({
   adminCode: config.adminCode, familyCode: config.familyCode, secret: process.env.SESSION_SECRET,
 });
@@ -161,7 +172,39 @@ app.use((req, res, next) => {
 });
 app.use(auth.middleware);
 
-app.get('/healthz', (req, res) => res.type('text').send('ok'));
+app.get('/healthz', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ ok: setupProblems.length === 0, problems: setupProblems, storage: storage.kind });
+});
+
+const SETUP_MESSAGES = {
+  db: 'אין חיבור למסד הנתונים. ב-Vercel: Storage → Neon → Connect Project.',
+  storage: 'לא הוגדר אחסון לקבצים. צריך להוסיף GOOGLE_DRIVE_FOLDER_ID, GOOGLE_OAUTH_CLIENT_ID ו-GOOGLE_OAUTH_CLIENT_SECRET.',
+  'storage-config': 'הגדרות האחסון לא תקינות. הפרטים מופיעים ב-Logs של Vercel.',
+  'oauth-secret': 'חסר GOOGLE_OAUTH_CLIENT_SECRET.',
+  'admin-code': 'חסר ADMIN_CODE.',
+};
+
+function setupPage(problems) {
+  const items = problems.map((p) => `<li>${escapeHtml(SETUP_MESSAGES[p] || p)}</li>`).join('');
+  return `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
+<title>הגדרה</title><style>body{font:17px/1.7 system-ui,sans-serif;background:#f6f4f0;color:#2a2826;margin:0}
+main{max-width:560px;margin:12vh auto;padding:0 16px}li{margin:8px 0}p{color:#78736b}</style></head>
+<body><main><h1>האתר עוד לא מוגדר עד הסוף</h1><ul>${items}</ul>
+<p>אחרי שמוסיפים משתנים ב-Vercel: Deployments → ⋯ → Redeploy.</p></main></body></html>`;
+}
+
+if (setupProblems.length) {
+  console.error('Setup incomplete:', setupProblems.join(', '));
+  app.use((req, res, next) => {
+    if (req.path === '/' || req.path === '/index.html') return res.status(503).type('html').send(setupPage(setupProblems));
+    if (req.path.startsWith('/api/') || req.path.startsWith('/media/') || req.path === '/cover') {
+      return res.status(503).json({ error: 'האתר עוד לא מוגדר.' });
+    }
+    next();
+  });
+}
 
 app.get(['/', '/index.html'], async (req, res) => {
   const settings = await db.getSettings();
@@ -485,16 +528,13 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: 'אירעה שגיאה. נסו שוב.' });
 });
 
-if (process.env.VERCEL && storage.kind === 'local') {
-  console.error('No file storage configured: connect a Vercel Blob store (private) to this project.');
-}
 if (!config.adminCode) console.warn('ADMIN_CODE is not set: nobody can delete posts or change the page.');
 if (!config.familyCode) console.warn('FAMILY_CODE is not set: family-only posts are visible to the admin only.');
 
 module.exports = app;
 
 if (require.main === module) {
-  Promise.all([storage.init(), db.init()]).then(() => {
+  Promise.all([storage.init?.(), db?.init()]).then(() => {
     app.listen(config.port, () => {
       console.log(`Memorial site on http://localhost:${config.port} (storage: ${storage.description})`);
     });

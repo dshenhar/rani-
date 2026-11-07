@@ -9,7 +9,7 @@
     "bundle": "esbuild scripts/blob-client-entry.js --bundle --format=esm --platform=browser --minify --legal-comments=none --outfile=public/vendor/blob-client.js"
   },
   "engines": {
-    "node": ">=20.12"
+    "node": "22.x"
   },
   "dependencies": {
     "@vercel/blob": "^2.8.2",
