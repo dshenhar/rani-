@@ -34,42 +34,55 @@
 
 ## התקנה
 
-### 1. Google Cloud: חשבון שירות (פעם אחת)
+### 1. Vercel: העלאה ראשונה
 
-1. נכנסים ל-[console.cloud.google.com](https://console.cloud.google.com) עם חשבון העבודה, ויוצרים פרויקט חדש (למשל `rani-memorial`).
-2. ב-**APIs & Services → Library** מחפשים **Google Drive API** ולוחצים **Enable**.
-3. ב-**IAM & Admin → Service Accounts** לוחצים **Create service account**, נותנים שם (למשל `memorial`), **Create and continue** ואז **Done**. אין צורך בהרשאות.
-4. נכנסים לחשבון השירות שנוצר: **Keys → Add key → Create new key → JSON**. יורד קובץ, וצריך לשמור אותו במקום בטוח.
-5. מעתיקים את כתובת המייל של חשבון השירות (`...@...iam.gserviceaccount.com`).
-
-**אם מופיעה השגיאה "Service account key creation is disabled":** זו מדיניות ברירת מחדל בארגונים חדשים. מנהל-על של ה-Workspace עושה את זה פעם אחת:
-1. נכנסים ל-**IAM & Admin → Organization Policies**, ובוחרים למעלה את הפרויקט.
-2. פותחים את **Disable service account key creation** ולוחצים **Manage policy**.
-3. בוחרים **Override parent's policy**, מגדירים **Enforcement: Off** ושומרים.
-
-כדי לעשות את זה צריך את התפקיד Organization Policy Administrator ברמת הארגון. מנהל-על יכול לתת אותו לעצמו ב-IAM.
-
-### 2. הדרייב המשותף
-
-1. בדרייב המשותף: **Manage members**, ומוסיפים את המייל של חשבון השירות כ-**Content manager**.
-   אם הוספת חשבון מחוץ לארגון חסומה, מנהל ה-Workspace צריך לאפשר חברים חיצוניים בדרייב המשותף הזה. חשבון שירות נחשב חיצוני.
-2. יוצרים בדרייב המשותף תיקייה (למשל `רני אלון – זיכרונות`), פותחים אותה ומעתיקים את ה-ID מהכתובת. זה החלק שאחרי `/folders/`.
-
-### 3. Vercel
-
-1. **Add New → Project** ובוחרים את הריפו `rani-`. Vercel מזהה Express לבד. לוחצים **Deploy**.
+1. ב-[vercel.com](https://vercel.com): **Add New → Project**, ובוחרים את הריפו `rani-`. לוחצים **Deploy**.
 2. בלשונית **Storage**: **Create → Neon (Postgres)**, ומחברים לפרויקט.
-3. ב-**Settings → Environment Variables** מוסיפים:
+3. מעתיקים את הכתובת של האתר, למשל `https://rani-xxxx.vercel.app`. צריך אותה בשלב הבא.
+
+### 2. Google Cloud: אישור התחברות (פעם אחת)
+
+ב-[console.cloud.google.com](https://console.cloud.google.com), בפרויקט שיצרתם:
+
+1. ב-**APIs & Services → Library** מחפשים **Google Drive API** ולוחצים **Enable**.
+2. ב-**APIs & Services → OAuth consent screen** (נפתח בשם Google Auth Platform) לוחצים **Get started**:
+   1. ממלאים שם (למשל `רני אלון`) ומייל.
+   2. ב-**Audience** בוחרים **Internal**, כלומר רק משתמשים בארגון.
+   3. לוחצים **Create**.
+3. ב-**Clients → Create client** בוחרים **Web application**.
+4. ב-**Authorized redirect URIs** מוסיפים את כתובת האתר עם `/api/google/callback` בסוף, למשל:
+   `https://rani-xxxx.vercel.app/api/google/callback`
+5. לוחצים **Create**, ומעתיקים מיד את **Client ID** ואת **Client secret**. את הסוד מציגים רק פעם אחת.
+
+אין צורך בחשבון שירות או במפתח, ואין צורך לשנות מדיניות של הארגון.
+
+### 3. הדרייב המשותף
+
+יוצרים בדרייב המשותף תיקייה (למשל `רני אלון – זיכרונות`), פותחים אותה ומעתיקים את ה-ID מהכתובת. זה החלק שאחרי `/folders/`.
+
+### 4. Vercel: הגדרות
+
+1. ב-**Settings → Environment Variables** מוסיפים:
    | משתנה | ערך |
    |---|---|
-   | `GOOGLE_SERVICE_ACCOUNT_KEY` | כל התוכן של קובץ ה-JSON מסעיף 1 |
-   | `GOOGLE_DRIVE_FOLDER_ID` | ה-ID של התיקייה מסעיף 2 |
+   | `GOOGLE_OAUTH_CLIENT_ID` | ה-Client ID משלב 2 |
+   | `GOOGLE_OAUTH_CLIENT_SECRET` | ה-Client secret משלב 2 |
+   | `GOOGLE_DRIVE_FOLDER_ID` | ה-ID של התיקייה משלב 3 |
    | `ADMIN_CODE` | קוד ארוך שרק אתם יודעים |
    | `FAMILY_CODE` | קוד שנמסר למשפחה |
-4. ב-**Deployments**, בפריסה האחרונה: **⋯ → Redeploy**.
-5. נכנסים פעם אחת עם `https://<הכתובת>/?k=<ADMIN_CODE>`, לוחצים **עריכת עמוד** ומעלים את התמונה.
+2. ב-**Deployments**, בפריסה האחרונה: **⋯ → Redeploy**.
+
+### 5. חיבור הדרייב והתמונה
+
+1. נכנסים לאתר עם `https://<הכתובת>/?k=<ADMIN_CODE>`.
+2. לוחצים **חיבור לגוגל דרייב**, בוחרים את חשבון העבודה ומאשרים. החשבון צריך להיות חבר בדרייב המשותף עם הרשאה להוסיף קבצים.
+3. חוזרים לאתר, ושם כתוב "גוגל דרייב חובר".
+4. לוחצים **עריכת עמוד** ומעלים את התמונה של רני.
 
 קישור כניסה ישירה למשפחה: `https://<הכתובת>/?k=<FAMILY_CODE>`
+
+> הקבצים נשמרים בשם החשבון שחובר, אבל הם שייכים לדרייב המשותף. אם צריך להחליף חשבון, לוחצים באתר על **החלפת חשבון**.
+> אם מוסיפים לאתר דומיין משלכם, צריך להוסיף גם את כתובת ה-callback שלו לשלב 2.
 
 ## הגדרות נוספות (לא חובה)
 
@@ -81,6 +94,7 @@
 
 ## אפשרויות אחסון אחרות
 
+- **חשבון שירות של גוגל** – במקום חיבור חשבון: `GOOGLE_SERVICE_ACCOUNT_KEY` (קובץ ה-JSON) ו-`GOOGLE_DRIVE_FOLDER_ID`. חשבון השירות צריך להיות חבר בדרייב המשותף כ-Content manager.
 - **Vercel Blob (פרטי)** – בלי `GOOGLE_DRIVE_FOLDER_ID`. ב-Storage יוצרים Blob עם Private ומחברים לפרויקט. במסלול Hobby יש רק 1GB.
 - **דיסק מקומי** – כשאין אף אחד מהם. מיועד להרצה על מחשב בלבד.
 

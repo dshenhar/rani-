@@ -11,7 +11,7 @@ try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env fi
 
 const { createStorage } = require('./lib/storage');
 const { createDb } = require('./lib/db');
-const { createAuth, canSeeFamily } = require('./lib/auth');
+const { createAuth, canSeeFamily, parseCookies } = require('./lib/auth');
 const { streamArchive, splitIntoParts } = require('./lib/archive');
 const { classify, cleanText, safeFileName, UPLOAD_TYPES } = require('./lib/media');
 
@@ -173,9 +173,10 @@ app.get(['/', '/index.html'], async (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), { index: false, maxAge: '7d' }));
 
 app.get('/api/state', async (req, res) => {
-  const [settings, posts] = await Promise.all([
+  const [settings, posts, drive] = await Promise.all([
     db.getSettings(),
     db.listPosts({ includeFamily: canSeeFamily(req.role) }),
+    req.role === 'admin' && storage.oauth ? storage.oauth.status() : null,
   ]);
   res.set('Cache-Control', 'no-store');
   res.json({
@@ -187,6 +188,7 @@ app.get('/api/state', async (req, res) => {
     uploadTypes: UPLOAD_TYPES,
     settings: publicSettings(settings),
     posts: posts.map(serializePost),
+    drive, // admin only: is a Google account connected for the files?
   });
 });
 
@@ -374,6 +376,41 @@ app.post('/api/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 40 }), express
 app.post('/api/logout', (req, res) => {
   auth.clear(req, res);
   res.json({ ok: true });
+});
+
+// ----- connecting Google Drive (admin) -----
+
+const OAUTH_COOKIE = 'memorial_google_state';
+const redirectUriFor = (req) => process.env.GOOGLE_OAUTH_REDIRECT_URI
+  || `${req.protocol}://${req.get('host')}/api/google/callback`;
+
+app.get('/api/google/connect', requireAdmin, (req, res) => {
+  if (!storage.oauth) return res.status(404).json({ error: 'לא נמצא' });
+  const state = crypto.randomBytes(16).toString('base64url');
+  res.cookie(OAUTH_COOKIE, state, {
+    httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: 15 * 60 * 1000, path: '/api/google',
+  });
+  res.redirect(storage.oauth.authUrl(state, redirectUriFor(req)));
+});
+
+app.get('/api/google/callback', async (req, res) => {
+  const back = (result) => res.redirect(`/?drive=${result}`);
+  const expected = parseCookies(req.headers.cookie)[OAUTH_COOKIE];
+  res.clearCookie(OAUTH_COOKIE, { httpOnly: true, sameSite: 'lax', secure: req.secure, path: '/api/google' });
+  if (!storage.oauth) return back('error');
+  if (req.role !== 'admin') return back('admin');
+  if (!expected || req.query.state !== expected) return back('error');
+  if (req.query.error || !req.query.code) return back('cancelled');
+  try {
+    const result = await storage.oauth.exchange(String(req.query.code), redirectUriFor(req));
+    // Keep a working connection rather than replace it with an account that cannot use the folder.
+    if (!(await storage.checkFolder(result.accessToken))) return back('folder');
+    await storage.oauth.save(result);
+    back('connected');
+  } catch (err) {
+    console.error('Connecting Google Drive failed:', err.message);
+    back('error');
+  }
 });
 
 // ----- page settings (admin) -----

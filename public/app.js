@@ -73,6 +73,16 @@
     settings: { name: '', subtitle: '', coverUrl: null },
     posts: [],
     filter: 'all',
+    drive: null, // admin only: { connected, email } when files go to Google Drive
+    driveFlash: null,
+  };
+
+  const DRIVE_MESSAGES = {
+    connected: 'גוגל דרייב חובר.',
+    folder: 'לחשבון שנבחר אין הרשאה להוסיף קבצים לתיקייה שהוגדרה. בחרו חשבון שחבר בדרייב המשותף, או בדקו את GOOGLE_DRIVE_FOLDER_ID.',
+    admin: 'צריך להיכנס עם קוד המנהל לפני החיבור.',
+    cancelled: 'החיבור בוטל.',
+    error: 'החיבור לגוגל לא הצליח. נסו שוב.',
   };
 
   async function load() {
@@ -106,6 +116,28 @@
       img.removeAttribute('src');
     }
     $('#admin-bar').hidden = state.role !== 'admin';
+    renderDriveBox();
+  }
+
+  // Admin only: whether a Google account is connected for storing the files.
+  function renderDriveBox() {
+    const box = $('#drive-box');
+    const drive = state.role === 'admin' ? state.drive : null;
+    if (!drive) { box.hidden = true; return; }
+    box.hidden = false;
+    const flash = state.driveFlash ? h('p', { class: 'drive-flash' }, DRIVE_MESSAGES[state.driveFlash] || DRIVE_MESSAGES.error) : null;
+    if (drive.connected) {
+      box.className = 'drive-box';
+      box.replaceChildren(flash || '',
+        h('span', null, `גוגל דרייב: ${drive.email || 'מחובר'}`),
+        h('span', { 'aria-hidden': 'true' }, ' · '),
+        h('a', { id: 'drive-connect', class: 'link', href: '/api/google/connect' }, 'החלפת חשבון'));
+    } else {
+      box.className = 'drive-box warn';
+      box.replaceChildren(flash || '',
+        h('p', null, 'גוגל דרייב עוד לא מחובר, ולכן אי אפשר להעלות.'),
+        h('a', { id: 'drive-connect', class: 'btn primary', href: '/api/google/connect' }, 'חיבור לגוגל דרייב'));
+    }
   }
 
   function renderFooter() {
@@ -844,10 +876,14 @@
     // A link of the form https://site/?k=CODE signs family members in directly.
     const params = new URLSearchParams(location.search);
     const code = params.get('k');
-    if (code) {
+    state.driveFlash = params.get('drive');
+    if (code || state.driveFlash) {
       params.delete('k');
+      params.delete('drive');
       const rest = params.toString();
       history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : '') + location.hash);
+    }
+    if (code) {
       try { await signIn(code); return; } catch { /* fall through to a normal load */ }
     }
     await load();
