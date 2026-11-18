@@ -122,12 +122,15 @@
   // ---------- header ----------
 
   function renderHero() {
-    const { name, subtitle, coverUrl } = state.settings;
+    const { name, subtitle, about, coverUrl } = state.settings;
     document.title = name;
     $('#name').textContent = name;
     const sub = $('#subtitle');
     sub.textContent = subtitle || '';
     sub.hidden = !subtitle;
+    const aboutEl = $('#about');
+    aboutEl.textContent = about || '';
+    aboutEl.hidden = !about;
     const img = $('#portrait');
     if (coverUrl) {
       if (img.getAttribute('src') !== coverUrl) img.src = coverUrl;
@@ -186,17 +189,21 @@
     for (const post of state.posts) for (const c of categories(post)) counts[c] = (counts[c] || 0) + 1;
     const available = FILTERS.filter(([key]) => key === 'all' || counts[key]);
     if (!available.some(([key]) => key === state.filter)) state.filter = 'all';
-    nav.replaceChildren();
-    if (available.length < 3) { nav.hidden = true; return; }
-    nav.hidden = false;
-    for (const [key, label] of available) {
-      nav.append(h('button', {
-        type: 'button',
-        class: 'chip',
-        'aria-pressed': String(state.filter === key),
-        onclick: () => { state.filter = key; renderFilters(); renderFeed(); },
-      }, label));
-    }
+    nav.classList.toggle('few', available.length < 3); // phones hide the tabs then; the computer window keeps them
+    nav.replaceChildren(...available.map(([key, label]) => h('button', {
+      type: 'button',
+      class: 'chip',
+      'aria-pressed': String(state.filter === key),
+      onclick: () => selectFilter(key),
+    }, label)));
+  }
+
+  function selectFilter(key) {
+    state.filter = key;
+    renderFilters();
+    renderFeed();
+    const feed = $('#feed');
+    if (feed.scrollHeight > feed.clientHeight) feed.scrollTop = 0; // computers: the window scrolls
   }
 
   function renderFeed() {
@@ -210,16 +217,18 @@
       h('span', null, label));
   }
 
+  const caption = (file) => (file.caption ? h('p', { class: 'caption' }, file.caption) : null);
+
   // One photo: shown whole. Several: a strip you swipe through, with a counter.
   function renderImages(images) {
     const slides = images.map((file, i) => {
-      const img = h('img', { src: file.previewUrl || file.url, alt: '', loading: 'lazy', decoding: 'async' });
+      const img = h('img', { src: file.previewUrl || file.url, alt: file.caption || '', loading: 'lazy', decoding: 'async' });
       const button = h('button', {
-        type: 'button', class: 'slide', 'aria-label': `תמונה ${i + 1} מתוך ${images.length}`,
+        type: 'button', class: 'slide-img', 'aria-label': `תמונה ${i + 1} מתוך ${images.length}`,
         onclick: () => openLightbox(images, i),
       }, img);
       img.addEventListener('error', () => button.replaceWith(fileTile(file, 'הורדת התמונה')), { once: true });
-      return button;
+      return h('figure', { class: 'slide' }, button, caption(file));
     });
     if (images.length === 1) return h('div', { class: 'gallery single' }, slides);
 
@@ -243,11 +252,11 @@
       src: file.previewUrl ? file.url : `${file.url}#t=0.1`,
     });
     video.addEventListener('error', () => video.replaceWith(fileTile(file, 'הורדת הסרטון')), { once: true });
-    return h('div', { class: 'video' }, video);
+    return h('figure', { class: 'video' }, video, caption(file));
   }
 
   function renderAudio(file) {
-    return h('div', { class: 'audio' }, h('audio', { controls: true, preload: 'metadata', src: file.url }));
+    return h('figure', { class: 'audio' }, caption(file), h('audio', { controls: true, preload: 'metadata', src: file.url }));
   }
 
   function renderPost(post) {
@@ -438,7 +447,7 @@
       $('#f-name').value = post.name || '';
       $('#f-text').value = post.text || '';
       composeForm.querySelector(`input[value="${post.visibility}"]`).checked = true;
-      attachments = post.files.map((f) => ({ id: ++attachmentSeq, existing: f, removed: false }));
+      attachments = post.files.map((f) => ({ id: ++attachmentSeq, existing: f, removed: false, caption: f.caption || '' }));
       renderAttachments();
     } else {
       if (editing) resetComposer(); // leave edit mode; keep a draft of a new memory otherwise
@@ -483,7 +492,7 @@
       return;
     }
     const url = type === 'image' || type === 'audio' ? URL.createObjectURL(file) : null;
-    attachments.push({ id: ++attachmentSeq, file, type, mime, url });
+    attachments.push({ id: ++attachmentSeq, file, type, mime, url, caption: '' });
     renderAttachments();
   }
 
@@ -514,10 +523,16 @@
       } else {
         thumb.append(icons[type]());
       }
+      const captionInput = a.removed ? null : h('input', {
+        type: 'text', class: 'att-caption', maxlength: '500', value: a.caption || '',
+        placeholder: 'תיאור (לא חובה)', 'aria-label': `תיאור ל-${name}`, disabled: uploading,
+      });
+      captionInput?.addEventListener('input', () => { a.caption = captionInput.value; });
       const info = h('span', { class: 'att-info' },
         h('span', { class: 'att-name' }, name),
         h('span', { class: 'att-size' }, a.removed ? 'יוסר בשמירה' : size ? fmtSize(size) : ''),
-        type === 'audio' && !a.removed ? h('audio', { controls: true, preload: 'metadata', src: existing ? existing.url : a.url }) : null);
+        type === 'audio' && !a.removed ? h('audio', { controls: true, preload: 'metadata', src: existing ? existing.url : a.url }) : null,
+        captionInput);
       return h('li', { class: a.removed ? 'removed' : '' }, thumb, info,
         h('button', {
           type: 'button', class: 'icon-btn',
@@ -623,6 +638,7 @@
         name: a.file.name,
         mime: a.mime,
         size: a.file.size,
+        caption: (a.caption || '').trim(),
       };
       uploads.push({ pathname: meta.pathname, body: a.file, mime: a.mime, name: a.file.name });
       const preview = a.type === 'image' ? await imagePreview(a.file)
@@ -690,6 +706,8 @@
           body: JSON.stringify({
             name, text, visibility, addFiles,
             removeFiles: attachments.filter((a) => a.existing && a.removed).map((a) => a.existing.id),
+            captions: Object.fromEntries(attachments.filter((a) => a.existing && !a.removed)
+              .map((a) => [a.existing.id, (a.caption || '').trim()])),
           }),
         }));
       } else {
@@ -868,6 +886,7 @@
     showError($('#settings-error'), '');
     $('#s-name').value = state.settings.name;
     $('#s-subtitle').value = state.settings.subtitle || '';
+    $('#s-about').value = state.settings.about || '';
     pendingCover = null;
     removeCover = false;
     showCoverPreview(state.settings.coverUrl);
@@ -895,7 +914,7 @@
     const button = e.submitter || $('#settings-form button[type="submit"]');
     button.disabled = true;
     try {
-      const changes = { name: $('#s-name').value, subtitle: $('#s-subtitle').value };
+      const changes = { name: $('#s-name').value, subtitle: $('#s-subtitle').value, about: $('#s-about').value };
       if (pendingCover) {
         const resized = await imagePreview(pendingCover);
         const body = resized || pendingCover;
@@ -952,6 +971,9 @@
   function showLightboxImage() {
     const file = lbList[lbIndex];
     lbImg.src = file.previewUrl || file.url;
+    const lbCaption = $('#lb-caption');
+    lbCaption.textContent = file.caption || '';
+    lbCaption.hidden = !file.caption;
     const many = lbList.length > 1;
     $('.lb-prev', lightbox).hidden = !many;
     $('.lb-next', lightbox).hidden = !many;
@@ -973,7 +995,9 @@
 
   $('.lb-prev', lightbox).addEventListener('click', () => step(-1));
   $('.lb-next', lightbox).addEventListener('click', () => step(1));
-  lightbox.addEventListener('click', (e) => { if (e.target === lightbox) lightbox.close(); });
+  lightbox.addEventListener('click', (e) => {
+    if (e.target === lightbox || e.target.classList.contains('lb-figure')) lightbox.close();
+  });
   lightbox.addEventListener('close', () => lbImg.removeAttribute('src'));
   lightbox.addEventListener('keydown', (e) => {
     // Right-to-left page: the left arrow moves forward.

@@ -122,11 +122,14 @@ function serializePost(post, req) {
       mime: f.mime,
       name: f.name,
       size: f.size,
+      caption: f.caption || '',
       url: `/media/${post.id}/${f.id}`,
       previewUrl: hasPreview(f) ? `/media/${post.id}/${f.id}/preview` : null,
     })),
   };
 }
+
+const CAPTION_MAX = 500; // description under a single photo or video
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
@@ -179,6 +182,7 @@ function parseFiles(input, postId, takenPathnames = new Set()) {
       mime: kind.mime,
       name: safeFileName(f.name, `file${kind.ext}`),
       size: Math.max(0, Math.min(Number(f.size) || 0, MAX_FILE_BYTES)),
+      caption: cleanText(f.caption, CAPTION_MAX),
     });
   }
   return files;
@@ -224,6 +228,7 @@ function convertInBackground(post) {
 const publicSettings = (s) => ({
   name: s.name,
   subtitle: s.subtitle,
+  about: s.about || '',
   coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
 });
 
@@ -280,6 +285,8 @@ function renderIndex(req, settings) {
     .replaceAll('{{NAME}}', escapeHtml(s.name))
     .replaceAll('{{SUBTITLE}}', escapeHtml(s.subtitle || ''))
     .replace('{{SUBTITLE_HIDDEN}}', s.subtitle ? '' : 'hidden')
+    .replace('{{ABOUT}}', escapeHtml(s.about || ''))
+    .replace('{{ABOUT_HIDDEN}}', s.about ? '' : 'hidden')
     .replace('{{COVER}}', s.coverUrl ? `src="${escapeHtml(s.coverUrl)}"` : 'hidden')
     .replace('{{OG_IMAGE}}', ogImage)
     .replaceAll('{{V}}', assetVersion);
@@ -528,7 +535,12 @@ app.patch('/api/posts/:id', express.json({ limit: '256kb' }), async (req, res) =
   const removed = post.files.filter((f) => removeIds.has(f.id));
   const added = parseFiles(body.addFiles, post.id, new Set(post.files.map((f) => f.pathname)));
   if (!added || added.some((f) => fileIndex(f) < nextIndexOf(post))) return res.status(400).json({ error: 'בקשה לא תקינה' });
-  next.files = [...post.files.filter((f) => !removeIds.has(f.id)), ...added];
+  // Descriptions of files already in the post: { fileId: text }.
+  const captions = body.captions && typeof body.captions === 'object' ? body.captions : {};
+  const kept = post.files.filter((f) => !removeIds.has(f.id)).map((f) => (
+    Object.hasOwn(captions, f.id) ? { ...f, caption: cleanText(captions[f.id], CAPTION_MAX) } : f
+  ));
+  next.files = [...kept, ...added];
   if (!next.text && next.files.length === 0) {
     return res.status(400).json({ error: 'לא נשאר טקסט או קובץ. אפשר למחוק את הזיכרון.' });
   }
@@ -639,6 +651,7 @@ app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (r
   const changes = {
     name: cleanText(body.name, 120) || config.defaultName,
     subtitle: cleanText(body.subtitle, 200),
+    about: cleanText(body.about, 2000),
   };
   const old = (await db.getSettings()).cover;
   if (body.coverPathname) {
