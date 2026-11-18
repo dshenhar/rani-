@@ -140,6 +140,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .portrait-wrap {
   position: relative;
   width: min(230px, 62vw);
+  aspect-ratio: 4 / 5.35; /* the 4:5 photo plus a little room below it for the name */
   margin: 0 auto 6px;
 }
 .portrait-wrap::before {
@@ -148,7 +149,7 @@ button, input, textarea { font: inherit; color: inherit; }
   z-index: 0;
   left: -20%;
   right: -20%;
-  top: 42%;
+  top: 47%;
   bottom: -12%;
   background: radial-gradient(ellipse 58% 52% at 50% 62%, var(--fade) 0%, var(--fade) 38%, transparent 74%);
   pointer-events: none;
@@ -161,14 +162,14 @@ button, input, textarea { font: inherit; color: inherit; }
   aspect-ratio: 4 / 5;
   object-fit: cover;
   border-radius: 16px 16px 0 0;
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 50%, rgba(0, 0, 0, .55) 68%, transparent 90%);
-  mask-image: linear-gradient(to bottom, #000 0%, #000 50%, rgba(0, 0, 0, .55) 68%, transparent 90%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 58%, rgba(0, 0, 0, .55) 76%, transparent 97%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 58%, rgba(0, 0, 0, .55) 76%, transparent 97%);
 }
 .signature {
   position: absolute;
   z-index: 2;
   left: 50%;
-  bottom: 1%;
+  bottom: 0;
   width: 60%;
   aspect-ratio: 475 / 431;
   transform: translateX(-50%);
@@ -177,6 +178,7 @@ button, input, textarea { font: inherit; color: inherit; }
   mask: url(/signature.png) center / contain no-repeat;
 }
 /* No photo yet: just the handwritten name. */
+.portrait-wrap.no-photo { aspect-ratio: auto; }
 .portrait-wrap.no-photo::before { display: none; }
 .portrait-wrap.no-photo .signature { position: static; display: block; width: 62%; margin: 0 auto; transform: none; }
 
