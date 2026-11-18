@@ -15,6 +15,8 @@
   --serif: "Frank Ruhl Libre", "David", Georgia, serif;
   --sans: "Assistant", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
   --bottom-bar: calc(76px + env(safe-area-inset-bottom));
+  --signature: #3f0196;              /* the handwritten name */
+  --fade: rgba(252, 235, 196, .95);  /* warm cream the photo fades into */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -29,6 +31,8 @@
     --primary-text: #1b1a19;
     --danger: #e08a7f;
     --focus: #a39d94;
+    --signature: #c3adff;
+    --fade: rgba(125, 100, 62, .45);
   }
 }
 
@@ -131,31 +135,61 @@ button, input, textarea { font: inherit; color: inherit; }
   padding: max(36px, env(safe-area-inset-top)) 16px 4px;
 }
 
+/* The photo and the handwritten name are two layers: the photo fades out at
+   the bottom into a soft warm glow, and the name sits over the fade. */
+.portrait-wrap {
+  position: relative;
+  width: min(230px, 62vw);
+  margin: 0 auto 6px;
+}
+.portrait-wrap::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  left: -20%;
+  right: -20%;
+  top: 42%;
+  bottom: -12%;
+  background: radial-gradient(ellipse 58% 52% at 50% 62%, var(--fade) 0%, var(--fade) 38%, transparent 74%);
+  pointer-events: none;
+}
 .portrait {
+  position: relative;
+  z-index: 1;
   display: block;
-  width: 150px;
+  width: 100%;
   aspect-ratio: 4 / 5;
   object-fit: cover;
-  margin: 0 auto 18px;
-  border-radius: 16px;
-  background: var(--surface-2);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .06);
+  border-radius: 16px 16px 0 0;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 50%, rgba(0, 0, 0, .55) 68%, transparent 90%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 50%, rgba(0, 0, 0, .55) 68%, transparent 90%);
 }
-
-h1 {
-  font-family: var(--serif);
-  font-weight: 500;
-  font-size: clamp(2rem, 8vw, 2.75rem);
-  line-height: 1.2;
-  margin: 0;
-  letter-spacing: .01em;
+.signature {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: 1%;
+  width: 60%;
+  aspect-ratio: 475 / 431;
+  transform: translateX(-50%);
+  background-color: var(--signature);
+  -webkit-mask: url(/signature.png) center / contain no-repeat;
+  mask: url(/signature.png) center / contain no-repeat;
 }
+/* No photo yet: just the handwritten name. */
+.portrait-wrap.no-photo::before { display: none; }
+.portrait-wrap.no-photo .signature { position: static; display: block; width: 62%; margin: 0 auto; transform: none; }
 
-.subtitle {
-  unicode-bidi: plaintext;
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 1.05rem;
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .about {
@@ -776,7 +810,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--focus); }
 @media (min-width: 760px) {
   body { padding-bottom: 0; }
   .hero { padding-top: 56px; }
-  .portrait { width: 190px; margin-bottom: 22px; }
+  .portrait-wrap { width: 260px; }
   .compose-bar {
     position: static;
     padding: 26px 16px 4px;
@@ -797,12 +831,12 @@ input:focus, textarea:focus { outline: none; border-color: var(--focus); }
     flex-direction: column;
     justify-content: center;
     min-height: 0;
+    overflow-x: hidden; /* the glow around the photo may reach past the column */
     overflow-y: auto;
     padding: 48px 28px 28px;
   }
   .hero { padding: 0; }
-  .portrait { width: clamp(270px, 48vh, 480px); max-width: 100%; margin-bottom: 24px; }
-  h1 { font-size: clamp(2.4rem, 4vw, 3.2rem); }
+  .portrait-wrap { width: clamp(270px, 52vh, 500px); max-width: 100%; margin-bottom: 8px; }
   .compose-bar { padding: 28px 0 0; }
 
   .panel {

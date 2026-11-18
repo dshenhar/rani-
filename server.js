@@ -232,7 +232,6 @@ function convertInBackground(post) {
 
 const publicSettings = (s) => ({
   name: s.name,
-  subtitle: s.subtitle,
   about: s.about || '',
   coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
 });
@@ -288,8 +287,7 @@ function renderIndex(req, settings) {
   const ogImage = s.coverUrl ? `<meta property="og:image" content="${escapeHtml(origin + s.coverUrl)}">` : '';
   return indexTemplate
     .replaceAll('{{NAME}}', escapeHtml(s.name))
-    .replaceAll('{{SUBTITLE}}', escapeHtml(s.subtitle || ''))
-    .replace('{{SUBTITLE_HIDDEN}}', s.subtitle ? '' : 'hidden')
+    .replace('{{NO_PHOTO}}', s.coverUrl ? '' : 'no-photo')
     .replace('{{ABOUT}}', escapeHtml(s.about || ''))
     .replace('{{ABOUT_HIDDEN}}', s.about ? '' : 'hidden')
     .replace('{{COVER}}', s.coverUrl ? `src="${escapeHtml(s.coverUrl)}"` : 'hidden')
@@ -661,7 +659,6 @@ app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (r
   const body = req.body || {};
   const changes = {
     name: cleanText(body.name, 120) || config.defaultName,
-    subtitle: cleanText(body.subtitle, 200),
     about: cleanText(body.about, 2000),
   };
   const old = (await db.getSettings()).cover;

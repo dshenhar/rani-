@@ -137,7 +137,7 @@
     maxFileMB: 1024,
     uploadMode: 'local',
     uploadTypes: [],
-    settings: { name: '', subtitle: '', coverUrl: null },
+    settings: { name: '', about: '', coverUrl: null },
     posts: [],
     filter: 'all',
     drive: null, // admin only: { connected, email } when files go to Google Drive
@@ -170,12 +170,9 @@
   // ---------- header ----------
 
   function renderHero() {
-    const { name, subtitle, about, coverUrl } = state.settings;
+    const { name, about, coverUrl } = state.settings;
     document.title = name;
-    $('#name').textContent = name;
-    const sub = $('#subtitle');
-    sub.textContent = subtitle || '';
-    sub.hidden = !subtitle;
+    $('#name').textContent = name; // read by screen readers; the handwritten name is what people see
     const aboutEl = $('#about');
     aboutEl.textContent = about || '';
     aboutEl.hidden = !about;
@@ -187,6 +184,7 @@
       img.hidden = true;
       img.removeAttribute('src');
     }
+    $('#portrait-wrap').classList.toggle('no-photo', !coverUrl);
     renderDriveBox();
   }
 
@@ -1084,7 +1082,6 @@
   $('#open-settings').addEventListener('click', () => {
     showError($('#settings-error'), '');
     $('#s-name').value = state.settings.name;
-    $('#s-subtitle').value = state.settings.subtitle || '';
     $('#s-about').value = state.settings.about || '';
     pendingCover = null;
     removeCover = false;
@@ -1113,7 +1110,7 @@
     const button = e.submitter || $('#settings-form button[type="submit"]');
     button.disabled = true;
     try {
-      const changes = { name: $('#s-name').value, subtitle: $('#s-subtitle').value, about: $('#s-about').value };
+      const changes = { name: $('#s-name').value, about: $('#s-about').value };
       if (pendingCover) {
         const resized = await imagePreview(pendingCover);
         const body = resized || pendingCover;
