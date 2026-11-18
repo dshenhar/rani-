@@ -959,3 +959,46 @@ input:focus, textarea:focus { outline: none; border-color: var(--focus); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ---------- Plaid look ----------
+   A faint check like Rani's shirts behind the page, and colours taken from
+   it for the buttons and windows. To return to the plain look, delete this
+   whole block (and public/plaid.webp). */
+:root {
+  --bg: #f3f4f3;
+  --surface-2: #eaeef1;
+  --muted: #66707a;
+  --line: #dde2e6;
+  --primary: #536477;      /* slate blue from the checks */
+  --focus: #7d8fa1;
+  --chip-on: #e3eaf1;      /* pale blue square */
+  --chip-on-line: #a9b8c7;
+  --fade: rgba(247, 240, 226, .96); /* the cream stripe of the checks */
+  --plaid-opacity: .2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1d20;
+    --surface: #24272b;
+    --surface-2: #2d3136;
+    --line: #363b41;
+    --muted: #a2aab3;
+    --primary: #c8d4e0;
+    --primary-text: #1b1d20;
+    --focus: #a2aab3;
+    --chip-on: #2f3842;
+    --chip-on-line: #6f8296;
+    --fade: rgba(125, 100, 62, .45);
+    --plaid-opacity: .05;
+  }
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: url(/plaid.webp) 0 0 / 420px 420px repeat;
+  opacity: var(--plaid-opacity);
+}
+.chip[aria-pressed="true"] { background: var(--chip-on); border-color: var(--chip-on-line); color: var(--text); }
