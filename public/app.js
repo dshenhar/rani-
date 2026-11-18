@@ -415,60 +415,29 @@
   }
 
   // ---------- computer cards: short and all the same height ----------
-  // The words take the right quarter (scrolling inside if long); the left three
-  // quarters hold a row of same-size tiles. When they don't all fit, an arrow
-  // at the left opens a window with the memory's whole gallery.
+  // The words sit in the right quarter (aligned right, scrolling inside if
+  // long). The photos and videos are same-size tiles lined up from the left
+  // edge of every card, text or not; when they don't all fit, the row scrolls
+  // sideways.
 
   function renderDesktopPost(post) {
     const items = [...visualItems(post), ...audioItems(post)];
     const webLinks = (post.links || []).filter((l) => l.kind !== 'youtube');
     const hasText = Boolean(post.text || webLinks.length);
-    let gallery = null;
-    if (items.length) {
-      const more = h('button', {
-        type: 'button', class: 'd-more', hidden: true, 'aria-label': 'כל התמונות והסרטונים',
-        onclick: () => openGallery(post, items),
-      }, h('span', { class: 'd-more-count' }), svg(['M15 5l-7 7 7 7']));
-      gallery = h('div', { class: 'd-gallery' },
-        h('div', { class: 'd-row' }, items.map((item, i) => renderSlide(item, i, items))), more);
-    }
+    const text = hasText || items.length ? h('div', { class: 'd-text' },
+      post.text ? h('p', { class: 'text' }, linkify(post.text)) : null,
+      webLinks.length ? renderLinks(webLinks) : null) : null;
+    // Left to right, so the first tile is always at the left edge.
+    const gallery = items.length ? h('div', { class: 'd-gallery' },
+      h('div', { class: 'd-row', dir: 'ltr' }, items.map((item, i) => renderSlide(item, i, items)))) : null;
     return h('article', { class: `card d-card${items.length ? ' has-media' : ''}${hasText ? ' has-text' : ''}`, 'data-id': post.id },
       cardHead(post),
-      h('div', { class: 'd-body' },
-        hasText ? h('div', { class: 'd-text' },
-          post.text ? h('p', { class: 'text' }, linkify(post.text)) : null,
-          webLinks.length ? renderLinks(webLinks) : null) : null,
-        gallery));
+      h('div', { class: 'd-body' }, text, gallery));
   }
 
-  /** Shows the arrow (with how many are hidden) on rows that don't fit. */
-  function markOverflowingRows() {
-    for (const gallery of document.querySelectorAll('.d-gallery')) {
-      const row = gallery.querySelector('.d-row');
-      const more = gallery.querySelector('.d-more');
-      const overflowing = row.scrollWidth > row.clientWidth + 1;
-      more.hidden = !overflowing;
-      if (!overflowing) continue;
-      // Right-to-left: what doesn't fit is past the left edge (or under the arrow).
-      const limit = row.getBoundingClientRect().left + more.offsetWidth;
-      const hidden = [...row.children].filter((tile) => tile.getBoundingClientRect().left < limit - 1).length;
-      more.querySelector('.d-more-count').textContent = hidden ? `+${hidden}` : '';
-    }
-  }
-
-  function afterLayout() {
-    markTrimmedText();
-    markOverflowingRows();
-  }
+  const afterLayout = () => markTrimmedText();
   window.addEventListener('resize', () => requestAnimationFrame(afterLayout));
   document.fonts?.ready.then(() => afterLayout());
-
-  // The gallery window: every photo, video and recording of one memory.
-  function openGallery(post, items) {
-    $('#gallery-title').textContent = [post.name, fmtDate(post.createdAt)].filter(Boolean).join(' · ');
-    $('#gallery-grid').replaceChildren(...items.map((item, i) => renderSlide(item, i, items)));
-    $('#gallery').showModal();
-  }
 
   function renderPost(post) {
     return phoneQuery.matches ? renderPhonePost(post) : renderDesktopPost(post);
@@ -479,7 +448,7 @@
   for (const dialog of document.querySelectorAll('dialog')) {
     dialog.addEventListener('click', (e) => {
       if (e.target.closest('[data-close]')) { dialog.close(); return; }
-      if (e.target === dialog && (dialog.classList.contains('small') || dialog.id === 'gallery')) dialog.close();
+      if (e.target === dialog && dialog.classList.contains('small')) dialog.close();
     });
   }
 
