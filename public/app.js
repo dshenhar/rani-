@@ -287,76 +287,10 @@
   function renderFeed() {
     const posts = state.posts.filter((p) => state.filter === 'all' || categories(p).has(state.filter));
     $('#feed').replaceChildren(...posts.map(renderPost));
-  }
-
-  function fileTile(file, label) {
-    return h('a', { class: 'file-tile', href: file.url, download: file.name || '' },
-      h('strong', null, file.name || 'קובץ'),
-      h('span', null, label));
+    requestAnimationFrame(afterLayout);
   }
 
   const caption = (file) => (file.caption ? h('p', { class: 'caption' }, file.caption) : null);
-
-  // One photo: shown whole. Several: a strip you swipe through, with a counter.
-  function renderImages(images) {
-    const slides = images.map((file, i) => {
-      const img = h('img', { src: file.previewUrl || file.url, alt: file.caption || '', loading: 'lazy', decoding: 'async' });
-      const button = h('button', {
-        type: 'button', class: 'slide-img', 'aria-label': `תמונה ${i + 1} מתוך ${images.length}`,
-        onclick: () => openLightbox(images, i),
-      }, img);
-      img.addEventListener('error', () => button.replaceWith(fileTile(file, 'הורדת התמונה')), { once: true });
-      return h('figure', { class: 'slide' }, button, caption(file));
-    });
-    if (images.length === 1) return h('div', { class: 'gallery single' }, slides);
-
-    const strip = h('div', { class: 'strip' }, slides);
-    const counter = h('span', { class: 'counter' }, `1 / ${images.length}`);
-    const dots = h('div', { class: 'dots', 'aria-hidden': 'true' }, images.map((_, i) => h('span', { class: i ? '' : 'on' })));
-    strip.addEventListener('scroll', () => {
-      const i = Math.round(Math.abs(strip.scrollLeft) / strip.clientWidth);
-      counter.textContent = `${i + 1} / ${images.length}`;
-      [...dots.children].forEach((d, j) => d.classList.toggle('on', j === i));
-    }, { passive: true });
-    return h('div', { class: 'gallery many' }, strip, counter, dots);
-  }
-
-  function renderVideo(file) {
-    const video = h('video', {
-      controls: true,
-      playsinline: true,
-      preload: file.previewUrl ? 'none' : 'metadata',
-      poster: file.previewUrl,
-      src: file.previewUrl ? file.url : `${file.url}#t=0.1`,
-    });
-    video.addEventListener('error', () => video.replaceWith(fileTile(file, 'הורדת הסרטון')), { once: true });
-    return h('figure', { class: 'video' }, video, caption(file));
-  }
-
-  // YouTube: a still with a play button; the player loads only when pressed.
-  function renderYouTube(link) {
-    const box = h('div', { class: 'yt' },
-      h('img', { src: `https://i.ytimg.com/vi/${link.videoId}/hqdefault.jpg`, alt: '', loading: 'lazy' }),
-      h('span', { class: 'yt-play', 'aria-hidden': 'true' }, icons.play()));
-    const play = () => {
-      const params = new URLSearchParams({ autoplay: '1', rel: '0', playsinline: '1' });
-      if (link.start) params.set('start', String(link.start));
-      box.replaceChildren(h('iframe', {
-        src: `https://www.youtube-nocookie.com/embed/${link.videoId}?${params}`,
-        title: link.caption || 'YouTube',
-        allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share',
-        allowfullscreen: true,
-        referrerpolicy: 'strict-origin-when-cross-origin', // YouTube needs to know which site embeds it
-      }));
-      box.classList.add('playing');
-    };
-    box.setAttribute('role', 'button');
-    box.setAttribute('tabindex', '0');
-    box.setAttribute('aria-label', 'ניגון הסרטון');
-    box.addEventListener('click', play, { once: true });
-    box.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); } }, { once: true });
-    return h('figure', { class: 'video yt-wrap' }, box, caption(link));
-  }
 
   function renderLinks(links) {
     return h('div', { class: 'links' }, links.map((l) => {
@@ -373,34 +307,171 @@
     return h('figure', { class: 'audio' }, caption(file), h('audio', { controls: true, preload: 'metadata', src: file.url }));
   }
 
-  function renderPost(post) {
-    const byType = (t) => post.files.filter((f) => f.type === t);
-    const images = byType('image');
-    const links = post.links || [];
-    const media = [
-      images.length ? renderImages(images) : null,
-      ...byType('video').map(renderVideo),
-      ...links.filter((l) => l.kind === 'youtube').map(renderYouTube),
-      ...byType('audio').map(renderAudio),
-    ].filter(Boolean);
-    const webLinks = links.filter((l) => l.kind !== 'youtube');
-    const classes = ['card'];
-    if (media.length) classes.push('has-media');
-    if (post.text) classes.push('has-text');
+  function cardHead(post) {
+    return h('header', { class: 'card-head' },
+      h('div', { class: 'who' },
+        post.name ? h('span', { class: 'author' }, post.name) : null,
+        h('time', { datetime: post.createdAt }, fmtDate(post.createdAt)),
+        post.visibility === 'family' ? h('span', { class: 'badge' }, icons.lock(), 'משפחה בלבד') : null),
+      canEdit(post) ? h('button', {
+        type: 'button', class: 'edit-btn', onclick: () => openEditor(post),
+      }, icons.edit(), 'עריכה') : null);
+  }
 
-    return h('article', { class: classes.join(' '), 'data-id': post.id },
-      h('header', { class: 'card-head' },
-        h('div', { class: 'who' },
-          post.name ? h('span', { class: 'author' }, post.name) : null,
-          h('time', { datetime: post.createdAt }, fmtDate(post.createdAt)),
-          post.visibility === 'family' ? h('span', { class: 'badge' }, icons.lock(), 'משפחה בלבד') : null),
-        canEdit(post) ? h('button', {
-          type: 'button', class: 'edit-btn', onclick: () => openEditor(post),
-        }, icons.edit(), 'עריכה') : null),
-      h('div', { class: 'card-body' },
-        media.length ? h('div', { class: 'card-media' }, media) : null,
-        post.text ? h('p', { class: 'text' }, linkify(post.text)) : null,
-        webLinks.length ? renderLinks(webLinks) : null));
+  // ---------- media tiles (phone carousel, computer row, gallery window) ----------
+  // Whole photos over a blurred copy of themselves, never cropped; videos show a
+  // cover with a play triangle. Tapping opens the viewer bubble.
+
+  const phoneQuery = matchMedia('(max-width: 759px)');
+  phoneQuery.addEventListener('change', () => renderFeed());
+
+  function visualItems(post) {
+    return [
+      ...post.files.filter((f) => f.type === 'image').map((file) => ({ kind: 'image', file })),
+      ...post.files.filter((f) => f.type === 'video').map((file) => ({ kind: 'video', file })),
+      ...(post.links || []).filter((l) => l.kind === 'youtube').map((link) => ({ kind: 'youtube', link })),
+    ];
+  }
+  const audioItems = (post) => post.files.filter((f) => f.type === 'audio').map((file) => ({ kind: 'audio', file }));
+
+  function renderSlide(item, index, items) {
+    const { kind } = item;
+    const src = kind === 'image' ? (item.file.previewUrl || item.file.url)
+      : kind === 'video' ? item.file.previewUrl
+        : kind === 'youtube' ? `https://i.ytimg.com/vi/${item.link.videoId}/hqdefault.jpg` : null;
+    const text = (item.file || item.link).caption || '';
+    const label = kind === 'image' ? 'הגדלת התמונה' : kind === 'audio' ? 'השמעת ההקלטה' : 'ניגון הסרטון';
+    const slide = h('button', {
+      type: 'button', class: `m-slide ${kind}`, 'aria-label': text ? `${label}: ${text}` : label,
+      onclick: () => openViewer(items, index),
+    });
+    if (kind === 'audio') {
+      slide.append(h('span', { class: 'm-audio-icon', 'aria-hidden': 'true' }, icons.audio()));
+    } else if (src) {
+      const fg = h('img', { class: 'm-fg', src, alt: '', loading: 'lazy', decoding: 'async' });
+      fg.addEventListener('error', () => {
+        slide.classList.add('broken');
+        fg.replaceWith(h('span', { class: 'm-file' }, (item.file && item.file.name) || ''));
+      }, { once: true });
+      if (kind !== 'youtube') slide.append(h('img', { class: 'm-bg', src, alt: '', loading: 'lazy', 'aria-hidden': 'true' }));
+      slide.append(fg);
+    } else {
+      // A video without a stored cover: its first frame shows instead.
+      slide.append(h('video', {
+        class: 'm-fg', src: `${item.file.url}#t=0.1`, preload: 'metadata', muted: true, playsinline: true,
+        'aria-hidden': 'true', tabindex: '-1',
+      }));
+    }
+    if (kind === 'video' || kind === 'youtube') slide.append(h('span', { class: 'm-play', 'aria-hidden': 'true' }, icons.play()));
+    if (text) slide.append(h('span', { class: 'm-caption' }, text));
+    return slide;
+  }
+
+  // ---------- phone cards: same height for every memory ----------
+  // One 16:9 area with photos, videos and YouTube in a carousel whose next item
+  // peeks in. Long text is trimmed with "קראו עוד".
+
+  function renderCarousel(items) {
+    const slides = items.map((item, i) => renderSlide(item, i, items));
+    if (items.length === 1) return h('div', { class: 'mc single' }, slides);
+    const track = h('div', { class: 'mc-track' }, slides);
+    const counter = h('span', { class: 'counter' }, `1 / ${items.length}`);
+    const dots = h('div', { class: 'dots', 'aria-hidden': 'true' }, items.map((_, i) => h('span', { class: i ? '' : 'on' })));
+    track.addEventListener('scroll', () => {
+      const step = slides[1].offsetLeft - slides[0].offsetLeft;
+      const i = Math.min(items.length - 1, Math.round(Math.abs(track.scrollLeft) / Math.abs(step || 1)));
+      counter.textContent = `${i + 1} / ${items.length}`;
+      [...dots.children].forEach((d, j) => d.classList.toggle('on', j === i));
+    }, { passive: true });
+    return h('div', { class: 'mc many' }, h('div', { class: 'mc-box' }, track, counter), dots);
+  }
+
+  function renderPhonePost(post) {
+    const items = visualItems(post);
+    const audios = post.files.filter((f) => f.type === 'audio');
+    const webLinks = (post.links || []).filter((l) => l.kind !== 'youtube');
+    let text = null;
+    if (post.text) {
+      const body = h('p', { class: `text m-text ${items.length ? 'short' : 'long'}` }, linkify(post.text));
+      const more = h('button', { type: 'button', class: 'more', hidden: true }, 'קראו עוד');
+      more.addEventListener('click', () => { body.classList.add('open'); more.remove(); });
+      text = h('div', { class: 'm-textwrap' }, body, more);
+    }
+    return h('article', { class: `card m-card${items.length ? ' has-media' : ''}`, 'data-id': post.id },
+      cardHead(post),
+      items.length ? renderCarousel(items) : null,
+      audios.length ? h('div', { class: 'm-audios' }, audios.map(renderAudio)) : null,
+      text,
+      webLinks.length ? renderLinks(webLinks) : null);
+  }
+
+  /** Shows "קראו עוד" only under text that is actually cut. */
+  function markTrimmedText() {
+    for (const wrap of document.querySelectorAll('.m-textwrap')) {
+      const body = wrap.querySelector('.m-text');
+      const more = wrap.querySelector('.more');
+      if (more && !body.classList.contains('open')) more.hidden = body.scrollHeight <= body.clientHeight + 2;
+    }
+  }
+
+  // ---------- computer cards: short and all the same height ----------
+  // The words take the right quarter (scrolling inside if long); the left three
+  // quarters hold a row of same-size tiles. When they don't all fit, an arrow
+  // at the left opens a window with the memory's whole gallery.
+
+  function renderDesktopPost(post) {
+    const items = [...visualItems(post), ...audioItems(post)];
+    const webLinks = (post.links || []).filter((l) => l.kind !== 'youtube');
+    const hasText = Boolean(post.text || webLinks.length);
+    let gallery = null;
+    if (items.length) {
+      const more = h('button', {
+        type: 'button', class: 'd-more', hidden: true, 'aria-label': 'כל התמונות והסרטונים',
+        onclick: () => openGallery(post, items),
+      }, h('span', { class: 'd-more-count' }), svg(['M15 5l-7 7 7 7']));
+      gallery = h('div', { class: 'd-gallery' },
+        h('div', { class: 'd-row' }, items.map((item, i) => renderSlide(item, i, items))), more);
+    }
+    return h('article', { class: `card d-card${items.length ? ' has-media' : ''}${hasText ? ' has-text' : ''}`, 'data-id': post.id },
+      cardHead(post),
+      h('div', { class: 'd-body' },
+        hasText ? h('div', { class: 'd-text' },
+          post.text ? h('p', { class: 'text' }, linkify(post.text)) : null,
+          webLinks.length ? renderLinks(webLinks) : null) : null,
+        gallery));
+  }
+
+  /** Shows the arrow (with how many are hidden) on rows that don't fit. */
+  function markOverflowingRows() {
+    for (const gallery of document.querySelectorAll('.d-gallery')) {
+      const row = gallery.querySelector('.d-row');
+      const more = gallery.querySelector('.d-more');
+      const overflowing = row.scrollWidth > row.clientWidth + 1;
+      more.hidden = !overflowing;
+      if (!overflowing) continue;
+      // Right-to-left: what doesn't fit is past the left edge (or under the arrow).
+      const limit = row.getBoundingClientRect().left + more.offsetWidth;
+      const hidden = [...row.children].filter((tile) => tile.getBoundingClientRect().left < limit - 1).length;
+      more.querySelector('.d-more-count').textContent = hidden ? `+${hidden}` : '';
+    }
+  }
+
+  function afterLayout() {
+    markTrimmedText();
+    markOverflowingRows();
+  }
+  window.addEventListener('resize', () => requestAnimationFrame(afterLayout));
+  document.fonts?.ready.then(() => afterLayout());
+
+  // The gallery window: every photo, video and recording of one memory.
+  function openGallery(post, items) {
+    $('#gallery-title').textContent = [post.name, fmtDate(post.createdAt)].filter(Boolean).join(' · ');
+    $('#gallery-grid').replaceChildren(...items.map((item, i) => renderSlide(item, i, items)));
+    $('#gallery').showModal();
+  }
+
+  function renderPost(post) {
+    return phoneQuery.matches ? renderPhonePost(post) : renderDesktopPost(post);
   }
 
   // ---------- dialogs (shared) ----------
@@ -408,7 +479,7 @@
   for (const dialog of document.querySelectorAll('dialog')) {
     dialog.addEventListener('click', (e) => {
       if (e.target.closest('[data-close]')) { dialog.close(); return; }
-      if (e.target === dialog && dialog.classList.contains('small')) dialog.close();
+      if (e.target === dialog && (dialog.classList.contains('small') || dialog.id === 'gallery')) dialog.close();
     });
   }
 
@@ -1157,51 +1228,82 @@
     }
   });
 
-  // ---------- photo viewer ----------
+  // ---------- viewer (a large bubble over the page) ----------
+  // Items: { kind: 'image' | 'video' | 'youtube', file?, link? }.
 
   const lightbox = $('#lightbox');
-  const lbImg = $('#lb-img');
+  const lbMedia = $('#lb-media');
   let lbList = [];
   let lbIndex = 0;
 
-  function showLightboxImage() {
-    const file = lbList[lbIndex];
-    lbImg.src = file.previewUrl || file.url;
+  function youtubeFrame(link, autoplay) {
+    const params = new URLSearchParams({ rel: '0', playsinline: '1' });
+    if (autoplay) params.set('autoplay', '1');
+    if (link.start) params.set('start', String(link.start));
+    return h('iframe', {
+      src: `https://www.youtube-nocookie.com/embed/${link.videoId}?${params}`,
+      title: link.caption || 'YouTube',
+      allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share',
+      allowfullscreen: true,
+      referrerpolicy: 'strict-origin-when-cross-origin', // YouTube needs to know which site embeds it
+    });
+  }
+
+  function showLightboxItem() {
+    const item = lbList[lbIndex];
+    let el;
+    if (item.kind === 'video') {
+      el = h('video', {
+        src: item.file.url, poster: item.file.previewUrl, controls: true, autoplay: true, playsinline: true,
+      });
+    } else if (item.kind === 'youtube') {
+      el = h('div', { class: 'lb-yt' }, youtubeFrame(item.link, true));
+    } else if (item.kind === 'audio') {
+      el = h('div', { class: 'lb-audio' }, icons.audio(), h('audio', { src: item.file.url, controls: true, autoplay: true }));
+    } else {
+      el = h('img', { src: item.file.previewUrl || item.file.url, alt: item.file.caption || '' });
+    }
+    lbMedia.replaceChildren(el); // also stops whatever was playing before
+    const text = (item.file || item.link).caption || '';
     const lbCaption = $('#lb-caption');
-    lbCaption.textContent = file.caption || '';
-    lbCaption.hidden = !file.caption;
+    lbCaption.textContent = text;
+    lbCaption.hidden = !text;
     const many = lbList.length > 1;
     $('.lb-prev', lightbox).hidden = !many;
     $('.lb-next', lightbox).hidden = !many;
     $('#lb-count').textContent = many ? `${lbIndex + 1} / ${lbList.length}` : '';
   }
 
-  function openLightbox(list, index) {
-    lbList = list;
+  function openViewer(items, index) {
+    lbList = items;
     lbIndex = index;
-    showLightboxImage();
-    lightbox.showModal();
+    showLightboxItem();
+    if (!lightbox.open) lightbox.showModal();
   }
 
   function step(delta) {
     if (lbList.length < 2) return;
     lbIndex = (lbIndex + delta + lbList.length) % lbList.length;
-    showLightboxImage();
+    showLightboxItem();
   }
 
   $('.lb-prev', lightbox).addEventListener('click', () => step(-1));
   $('.lb-next', lightbox).addEventListener('click', () => step(1));
   lightbox.addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]')) lbMedia.replaceChildren(); // stop playing right away
     if (e.target === lightbox || e.target.classList.contains('lb-figure')) lightbox.close();
   });
-  lightbox.addEventListener('close', () => lbImg.removeAttribute('src'));
+  lightbox.addEventListener('close', () => lbMedia.replaceChildren());
   lightbox.addEventListener('keydown', (e) => {
     // Right-to-left page: the left arrow moves forward.
     if (e.key === 'ArrowLeft') step(1);
     if (e.key === 'ArrowRight') step(-1);
   });
   let touchX = null;
-  lightbox.addEventListener('touchstart', (e) => { touchX = e.touches[0].clientX; }, { passive: true });
+  lightbox.addEventListener('touchstart', (e) => {
+    // Swiping over a playing video's controls should not change the item.
+    touchX = e.target.closest('video, iframe') ? null : e.touches[0].clientX;
+  }, { passive: true });
   lightbox.addEventListener('touchend', (e) => {
     if (touchX == null) return;
     const dx = e.changedTouches[0].clientX - touchX;
