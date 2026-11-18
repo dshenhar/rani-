@@ -15,6 +15,7 @@ const { createAuth, canSeeFamily, parseCookies } = require('./lib/auth');
 const { streamArchive, splitIntoParts } = require('./lib/archive');
 const { classify, cleanText, safeFileName, UPLOAD_TYPES } = require('./lib/media');
 const { heicToJpeg, isHeic } = require('./lib/heic');
+const { parseLinks: parseLinkList } = require('./lib/links');
 
 // Lets work finish after the response on Vercel (no-op elsewhere).
 let waitUntil = (promise) => promise;
@@ -116,6 +117,9 @@ function serializePost(post, req) {
     text: post.text,
     visibility: post.visibility,
     nextIndex: nextIndexOf(post),
+    links: (post.links || []).map((l) => ({
+      id: l.id, url: l.url, kind: l.kind, videoId: l.videoId, start: l.start, caption: l.caption || '',
+    })),
     files: post.files.map((f) => ({
       id: f.id,
       type: f.type,
@@ -130,6 +134,7 @@ function serializePost(post, req) {
 }
 
 const CAPTION_MAX = 500; // description under a single photo or video
+const parseLinks = (input) => parseLinkList(input, { newId, cleanText, captionMax: CAPTION_MAX });
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
@@ -490,12 +495,14 @@ app.post('/api/posts', rateLimit({ windowMs: 60 * 60 * 1000, max: 300 }), expres
   const visibility = body.visibility === 'family' ? 'family' : 'public';
   const files = parseFiles(body.files, draftId);
   if (!files) return res.status(400).json({ error: 'בקשה לא תקינה' });
-  if (!text && files.length === 0) return res.status(400).json({ error: 'נא להוסיף טקסט או קובץ.' });
+  const links = parseLinks(body.links);
+  if (!links) return res.status(400).json({ error: 'אחד הקישורים לא תקין.' });
+  if (!text && files.length === 0 && links.length === 0) return res.status(400).json({ error: 'נא להוסיף טקסט, קובץ או קישור.' });
 
   if (await db.getPost(draftId)) return res.status(409).json({ error: 'הפריט כבר נשמר.' });
   const editKey = crypto.randomBytes(24).toString('base64url');
   const post = {
-    id: draftId, createdAt: new Date().toISOString(), name, text, visibility, files,
+    id: draftId, createdAt: new Date().toISOString(), name, text, visibility, files, links,
     storage: { nextIndex: Math.max(-1, ...files.map(fileIndex)) + 1 },
     editHash: sha256(editKey),
   };
@@ -541,8 +548,12 @@ app.patch('/api/posts/:id', express.json({ limit: '256kb' }), async (req, res) =
     Object.hasOwn(captions, f.id) ? { ...f, caption: cleanText(captions[f.id], CAPTION_MAX) } : f
   ));
   next.files = [...kept, ...added];
-  if (!next.text && next.files.length === 0) {
-    return res.status(400).json({ error: 'לא נשאר טקסט או קובץ. אפשר למחוק את הזיכרון.' });
+  if ('links' in body) {
+    next.links = parseLinks(body.links);
+    if (!next.links) return res.status(400).json({ error: 'אחד הקישורים לא תקין.' });
+  }
+  if (!next.text && next.files.length === 0 && next.links.length === 0) {
+    return res.status(400).json({ error: 'לא נשאר טקסט, קובץ או קישור. אפשר למחוק את הזיכרון.' });
   }
   next.storage.nextIndex = Math.max(nextIndexOf(post), ...added.map((f) => fileIndex(f) + 1));
 

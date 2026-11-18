@@ -40,7 +40,55 @@
     audio: () => svg(['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M5 11a7 7 0 0 0 14 0', 'M12 18v3']),
     image: () => svg(['M3 5h18v14H3z', 'M3 16l5-5 4 4 3-3 6 6']),
     edit: () => svg(['M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4z', 'M13.5 6.5l4 4']),
+    link: () => svg(['M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1', 'M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1']),
+    play: () => svg(['M8 5v14l11-7z']),
   };
+
+  // ---------- links ----------
+
+  const URL_IN_TEXT = /(?:https?:\/\/|www\.)[^\s<>"']*[^\s<>"'.,;:!?)\]}״׳]/gi;
+
+  function parseUrl(raw) {
+    let text = String(raw || '').trim();
+    if (!text) return null;
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(text)) text = `https://${text}`;
+    try {
+      const url = new URL(text);
+      return (url.protocol === 'https:' || url.protocol === 'http:') && url.hostname.includes('.') ? url : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Same rules as the server (lib/links.js).
+  function youtubeInfo(url) {
+    const host = url.hostname.toLowerCase();
+    if (!/^(www\.|m\.|music\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)$/.test(host)) return null;
+    let id = null;
+    if (host.endsWith('youtu.be')) id = url.pathname.split('/')[1];
+    else if (url.pathname === '/watch') id = url.searchParams.get('v');
+    else id = (/^\/(?:shorts|embed|live|v)\/([^/?#]+)/.exec(url.pathname) || [])[1];
+    return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? { videoId: id } : null;
+  }
+
+  function describeLink(url) {
+    const yt = youtubeInfo(url);
+    return { url: url.href, kind: yt ? 'youtube' : 'web', videoId: yt ? yt.videoId : null };
+  }
+
+  /** Text with web addresses turned into links (built as DOM nodes, never HTML). */
+  function linkify(text) {
+    const parts = [];
+    let last = 0;
+    for (const m of text.matchAll(URL_IN_TEXT)) {
+      parts.push(text.slice(last, m.index));
+      const href = m[0].startsWith('www.') ? `https://${m[0]}` : m[0];
+      parts.push(h('a', { href, target: '_blank', rel: 'noopener noreferrer nofollow' }, m[0]));
+      last = m.index + m[0].length;
+    }
+    parts.push(text.slice(last));
+    return parts;
+  }
 
   const dateFormat = new Intl.DateTimeFormat('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
   const fmtDate = (iso) => dateFormat.format(new Date(iso));
@@ -139,23 +187,20 @@
       img.hidden = true;
       img.removeAttribute('src');
     }
-    $('#admin-bar').hidden = state.role !== 'admin';
     renderDriveBox();
   }
 
-  // Admin only: whether a Google account is connected for storing the files.
+  // Admin only: a notice when Google Drive is not connected (or just was).
+  // The connected account itself is listed in the gear menu.
   function renderDriveBox() {
     const box = $('#drive-box');
     const drive = state.role === 'admin' ? state.drive : null;
-    if (!drive) { box.hidden = true; return; }
-    box.hidden = false;
     const flash = state.driveFlash ? h('p', { class: 'drive-flash' }, DRIVE_MESSAGES[state.driveFlash] || DRIVE_MESSAGES.error) : null;
+    if (!drive || (drive.connected && !flash)) { box.hidden = true; return; }
+    box.hidden = false;
     if (drive.connected) {
       box.className = 'drive-box';
-      box.replaceChildren(flash || '',
-        h('span', null, `גוגל דרייב: ${drive.email || 'מחובר'}`),
-        h('span', { 'aria-hidden': 'true' }, ' · '),
-        h('a', { id: 'drive-connect', class: 'link', href: '/api/google/connect' }, 'החלפת חשבון'));
+      box.replaceChildren(flash);
     } else {
       box.className = 'drive-box warn';
       box.replaceChildren(flash || '',
@@ -164,11 +209,45 @@
     }
   }
 
+  // The gear menu: what it offers depends on who is looking.
   function renderFooter() {
     const member = state.role === 'family' || state.role === 'admin';
-    $('#member-links').hidden = !member;
-    $('#guest-links').hidden = member || !state.loginEnabled;
+    const admin = state.role === 'admin';
+    $('#open-login').hidden = member || !state.loginEnabled;
+    $('#open-settings').hidden = !admin;
+    $('#export-open').hidden = !member;
+    $('#logout').hidden = !member;
+    const driveNote = $('#drive-menu');
+    const drive = admin && state.drive && state.drive.connected ? state.drive : null;
+    driveNote.hidden = !drive;
+    if (drive) {
+      driveNote.replaceChildren(
+        h('span', { class: 'menu-note-text' }, `גוגל דרייב: ${drive.email || 'מחובר'}`),
+        h('a', { id: 'drive-connect', class: 'link', href: '/api/google/connect' }, 'החלפת חשבון'));
+    }
+    const anything = [...$('#gear-menu').children].some((el) => !el.hidden);
+    $('#gear').hidden = !anything;
+    if (!anything) closeGear();
   }
+
+  const gear = $('#gear');
+  const gearMenu = $('#gear-menu');
+  function closeGear() {
+    gearMenu.hidden = true;
+    gear.setAttribute('aria-expanded', 'false');
+  }
+  gear.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = gearMenu.hidden;
+    gearMenu.hidden = !open;
+    gear.setAttribute('aria-expanded', String(open));
+    if (open) gearMenu.querySelector('.menu-item:not([hidden])')?.focus();
+  });
+  gearMenu.addEventListener('click', (e) => { if (e.target.closest('.menu-item')) closeGear(); });
+  document.addEventListener('click', (e) => { if (!e.target.closest('.gear-wrap')) closeGear(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !gearMenu.hidden) { closeGear(); gear.focus(); }
+  });
 
   // ---------- feed ----------
 
@@ -180,6 +259,7 @@
     const set = new Set();
     if (post.text) set.add('text');
     for (const f of post.files) set.add(f.type);
+    if ((post.links || []).some((l) => l.kind === 'youtube')) set.add('video');
     return set;
   }
 
@@ -255,6 +335,42 @@
     return h('figure', { class: 'video' }, video, caption(file));
   }
 
+  // YouTube: a still with a play button; the player loads only when pressed.
+  function renderYouTube(link) {
+    const box = h('div', { class: 'yt' },
+      h('img', { src: `https://i.ytimg.com/vi/${link.videoId}/hqdefault.jpg`, alt: '', loading: 'lazy' }),
+      h('span', { class: 'yt-play', 'aria-hidden': 'true' }, icons.play()));
+    const play = () => {
+      const params = new URLSearchParams({ autoplay: '1', rel: '0', playsinline: '1' });
+      if (link.start) params.set('start', String(link.start));
+      box.replaceChildren(h('iframe', {
+        src: `https://www.youtube-nocookie.com/embed/${link.videoId}?${params}`,
+        title: link.caption || 'YouTube',
+        allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share',
+        allowfullscreen: true,
+        referrerpolicy: 'strict-origin-when-cross-origin', // YouTube needs to know which site embeds it
+      }));
+      box.classList.add('playing');
+    };
+    box.setAttribute('role', 'button');
+    box.setAttribute('tabindex', '0');
+    box.setAttribute('aria-label', 'ניגון הסרטון');
+    box.addEventListener('click', play, { once: true });
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); } }, { once: true });
+    return h('figure', { class: 'video yt-wrap' }, box, caption(link));
+  }
+
+  function renderLinks(links) {
+    return h('div', { class: 'links' }, links.map((l) => {
+      const url = parseUrl(l.url);
+      return h('a', { class: 'link-card', href: l.url, target: '_blank', rel: 'noopener noreferrer nofollow' },
+        icons.link(),
+        h('span', { class: 'l-text' },
+          l.caption ? h('span', { class: 'l-title' }, l.caption) : null,
+          h('span', { class: 'l-host' }, url ? url.hostname.replace(/^www\./, '') + (url.pathname.length > 1 ? url.pathname : '') : l.url)));
+    }));
+  }
+
   function renderAudio(file) {
     return h('figure', { class: 'audio' }, caption(file), h('audio', { controls: true, preload: 'metadata', src: file.url }));
   }
@@ -262,11 +378,14 @@
   function renderPost(post) {
     const byType = (t) => post.files.filter((f) => f.type === t);
     const images = byType('image');
+    const links = post.links || [];
     const media = [
       images.length ? renderImages(images) : null,
       ...byType('video').map(renderVideo),
+      ...links.filter((l) => l.kind === 'youtube').map(renderYouTube),
       ...byType('audio').map(renderAudio),
     ].filter(Boolean);
+    const webLinks = links.filter((l) => l.kind !== 'youtube');
     const classes = ['card'];
     if (media.length) classes.push('has-media');
     if (post.text) classes.push('has-text');
@@ -282,7 +401,8 @@
         }, icons.edit(), 'עריכה') : null),
       h('div', { class: 'card-body' },
         media.length ? h('div', { class: 'card-media' }, media) : null,
-        post.text ? h('p', { class: 'text' }, post.text) : null));
+        post.text ? h('p', { class: 'text' }, linkify(post.text)) : null,
+        webLinks.length ? renderLinks(webLinks) : null));
   }
 
   // ---------- dialogs (shared) ----------
@@ -433,6 +553,9 @@
     for (const a of attachments) if (a.url && !a.existing) URL.revokeObjectURL(a.url);
     attachments = [];
     editing = null;
+    dismissedVideos.clear();
+    $('#f-link').value = '';
+    $('#link-row').hidden = true;
     $('#f-text').value = '';
     composeForm.querySelector('input[value="public"]').checked = true;
     renderAttachments();
@@ -447,7 +570,10 @@
       $('#f-name').value = post.name || '';
       $('#f-text').value = post.text || '';
       composeForm.querySelector(`input[value="${post.visibility}"]`).checked = true;
-      attachments = post.files.map((f) => ({ id: ++attachmentSeq, existing: f, removed: false, caption: f.caption || '' }));
+      attachments = [
+        ...post.files.map((f) => ({ id: ++attachmentSeq, existing: f, removed: false, caption: f.caption || '' })),
+        ...(post.links || []).map((l) => ({ id: ++attachmentSeq, link: l, caption: l.caption || '' })),
+      ];
       renderAttachments();
     } else {
       if (editing) resetComposer(); // leave edit mode; keep a draft of a new memory otherwise
@@ -499,7 +625,10 @@
   function removeAttachment(id) {
     const a = attachments.find((x) => x.id === id);
     if (!a) return;
-    if (a.existing) {
+    if (a.link) {
+      if (a.link.videoId) dismissedVideos.add(a.link.videoId); // don't add it back from the text
+      attachments = attachments.filter((x) => x.id !== id);
+    } else if (a.existing) {
       a.removed = !a.removed; // existing files can be put back until saving
     } else {
       if (a.url) URL.revokeObjectURL(a.url);
@@ -508,8 +637,30 @@
     renderAttachments();
   }
 
+  function renderLinkAttachment(a) {
+    const { link } = a;
+    const url = parseUrl(link.url);
+    const thumb = h('span', { class: 'att-thumb' },
+      link.kind === 'youtube' ? h('img', { src: `https://i.ytimg.com/vi/${link.videoId}/default.jpg`, alt: '' }) : icons.link());
+    const captionInput = h('input', {
+      type: 'text', class: 'att-caption', maxlength: '500', value: a.caption || '',
+      placeholder: 'תיאור (לא חובה)', 'aria-label': 'תיאור לקישור', disabled: uploading,
+    });
+    captionInput.addEventListener('input', () => { a.caption = captionInput.value; });
+    return h('li', { class: 'is-link' }, thumb,
+      h('span', { class: 'att-info' },
+        h('span', { class: 'att-name' }, link.kind === 'youtube' ? 'סרטון יוטיוב' : (url ? url.hostname.replace(/^www\./, '') : 'קישור')),
+        h('span', { class: 'att-size att-url' }, link.url),
+        captionInput),
+      h('button', {
+        type: 'button', class: 'icon-btn', 'aria-label': 'הסרת הקישור', disabled: uploading,
+        onclick: () => removeAttachment(a.id),
+      }, '×'));
+  }
+
   function renderAttachments() {
     attachmentList.replaceChildren(...attachments.map((a) => {
+      if (a.link) return renderLinkAttachment(a);
       const existing = a.existing;
       const type = existing ? existing.type : a.type;
       const name = existing ? existing.name : a.file.name;
@@ -541,6 +692,50 @@
         }, a.removed ? '↺' : '×'));
     }));
   }
+
+  const dismissedVideos = new Set();
+
+  function addLink(raw, { quiet = false } = {}) {
+    const url = parseUrl(raw);
+    if (!url) {
+      if (!quiet) showError(composeError, 'הקישור לא תקין.');
+      return false;
+    }
+    const link = describeLink(url);
+    const dup = attachments.some((a) => a.link && (a.link.url === link.url || (link.videoId && a.link.videoId === link.videoId)));
+    if (!dup) attachments.push({ id: ++attachmentSeq, link, caption: '' });
+    renderAttachments();
+    return true;
+  }
+
+  $('#link-start').addEventListener('click', () => {
+    $('#link-row').hidden = false;
+    $('#f-link').focus();
+  });
+  function submitLinkField() {
+    showError(composeError, '');
+    if (addLink($('#f-link').value)) {
+      $('#f-link').value = '';
+      $('#link-row').hidden = true;
+    }
+  }
+  $('#link-add').addEventListener('click', submitLinkField);
+  $('#f-link').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitLinkField(); }
+  });
+
+  // A YouTube address pasted into the text also becomes a video of the memory.
+  let textScan = null;
+  $('#f-text').addEventListener('input', () => {
+    clearTimeout(textScan);
+    textScan = setTimeout(() => {
+      for (const m of $('#f-text').value.matchAll(URL_IN_TEXT)) {
+        const url = parseUrl(m[0]);
+        const yt = url && youtubeInfo(url);
+        if (yt && !dismissedVideos.has(yt.videoId)) addLink(m[0], { quiet: true });
+      }
+    }, 500);
+  });
 
   // Smaller copies made in the browser: they load fast in the page, while the
   // original files are kept for the family.
@@ -686,9 +881,13 @@
     const name = $('#f-name').value.trim();
     const text = $('#f-text').value.trim();
     const visibility = composeForm.querySelector('input[name="visibility"]:checked')?.value || 'public';
-    const newOnes = attachments.filter((a) => !a.existing);
+    if ($('#f-link').value.trim() && !addLink($('#f-link').value)) return; // a link typed but not added yet
+    $('#f-link').value = '';
+    const newOnes = attachments.filter((a) => !a.existing && !a.link);
     const keptOld = attachments.filter((a) => a.existing && !a.removed);
-    if (!text && !newOnes.length && !keptOld.length) {
+    const links = attachments.filter((a) => a.link)
+      .map((a) => ({ id: a.link.id, url: a.link.url, caption: (a.caption || '').trim() }));
+    if (!text && !newOnes.length && !keptOld.length && !links.length) {
       showError(composeError, editing ? 'לא נשאר טקסט או קובץ. אפשר למחוק את הזיכרון.' : 'נא לכתוב טקסט או לצרף קובץ.');
       return;
     }
@@ -704,7 +903,7 @@
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            name, text, visibility, addFiles,
+            name, text, visibility, addFiles, links,
             removeFiles: attachments.filter((a) => a.existing && a.removed).map((a) => a.existing.id),
             captions: Object.fromEntries(attachments.filter((a) => a.existing && !a.removed)
               .map((a) => [a.existing.id, (a.caption || '').trim()])),
@@ -717,7 +916,7 @@
         const result = await api('/api/posts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ draftId, name, text, visibility, files }),
+          body: JSON.stringify({ draftId, name, text, visibility, files, links }),
         });
         post = result.post;
         if (result.editKey) editKeys.set(post.id, result.editKey);
