@@ -15,6 +15,7 @@ const { createAuth, canSeeFamily, parseCookies } = require('./lib/auth');
 const { streamArchive, splitIntoParts } = require('./lib/archive');
 const { classify, cleanText, safeFileName, UPLOAD_TYPES } = require('./lib/media');
 const { heicToJpeg, isHeic } = require('./lib/heic');
+const poster = require('./lib/poster');
 const { parseLinks: parseLinkList } = require('./lib/links');
 
 // Lets work finish after the response on Vercel (no-op elsewhere).
@@ -102,8 +103,14 @@ function writeAuthorKeys(req, res, keys) {
 
 const canSee = (req, post) => post.visibility === 'public' || canSeeFamily(req.role) || isAuthor(req, post);
 
-// iPhone photos get a JPEG copy made on the server (see ensureHeicPreview).
-const hasPreview = (f) => Boolean(f.previewPathname) || (f.type === 'image' && isHeic(f.mime));
+// iPhone photos get a JPEG copy made on the server (see ensureHeicPreview), and
+// every video gets a checked cover (see ensureVideoPoster).
+const canMakePosters = () => poster.available() && Boolean(storage.mediaInput && storage.putBuffer);
+const hasPreview = (f) => Boolean(f.previewPathname)
+  || (f.type === 'image' && isHeic(f.mime))
+  || (f.type === 'video' && !f.posterChecked && canMakePosters());
+// Changes when a cover is replaced, so browsers don't keep showing an old one.
+const previewVersion = (f) => (f.type === 'video' ? `?v=${String(f.previewRef || f.previewPathname || 'n').slice(-8)}${f.posterChecked ? 1 : 0}` : '');
 const fileIndex = (f) => Number(MEDIA_PATH_RE.exec(f.pathname)?.[2] ?? -1);
 // Index for the next file added to a post; never reused, so storage paths stay unique.
 const nextIndexOf = (post) => post.storage?.nextIndex ?? Math.max(-1, ...post.files.map(fileIndex)) + 1;
@@ -128,7 +135,7 @@ function serializePost(post, req) {
       size: f.size,
       caption: f.caption || '',
       url: `/media/${post.id}/${f.id}`,
-      previewUrl: hasPreview(f) ? `/media/${post.id}/${f.id}/preview` : null,
+      previewUrl: hasPreview(f) ? `/media/${post.id}/${f.id}/preview${previewVersion(f)}` : null,
     })),
   };
 }
@@ -224,9 +231,52 @@ function ensureHeicPreview(post, file) {
   return converting.get(key);
 }
 
+// Checks a video's cover (browsers sometimes capture a black frame) and makes a
+// proper one with ffmpeg when it is black or missing. Done once per video.
+function ensureVideoPoster(post, file) {
+  if (file.type !== 'video' || file.posterChecked || !canMakePosters()) return Promise.resolve(file);
+  const key = `${post.id}/${file.id}`;
+  if (!converting.has(key)) {
+    converting.set(key, (async () => {
+      let blank = false;
+      if (file.previewPathname) {
+        try {
+          const current = await streamToBuffer(await storage.openRead(previewRefOf(file)), 20 * 1024 * 1024);
+          blank = poster.isBlank(current);
+        } catch {
+          blank = true; // unreadable: replace it
+        }
+        if (!blank) {
+          await db.updateFile(post.id, file.id, { posterChecked: true });
+          return { ...file, posterChecked: true };
+        }
+      }
+      let jpeg;
+      try {
+        jpeg = await poster.videoPoster(await storage.mediaInput(refOf(file)));
+      } catch (err) {
+        console.error(`Could not make a cover for ${file.name}:`, err.message);
+        // Without a usable cover the page shows the video's own first frame.
+        const changes = blank ? { previewPathname: null, previewRef: null, posterChecked: true } : { posterChecked: true };
+        await db.updateFile(post.id, file.id, changes);
+        return { ...file, ...changes };
+      }
+      const previewPathname = `media/${post.id}/${fileIndex(file)}.preview.jpg`;
+      const previewRef = await storage.putBuffer(previewPathname, jpeg, 'image/jpeg');
+      await db.updateFile(post.id, file.id, { previewPathname, previewRef, posterChecked: true });
+      const old = file.previewRef && file.previewRef !== previewRef ? file.previewRef : null;
+      if (old) storage.remove([old]).catch(() => {});
+      return { ...file, previewPathname, previewRef, posterChecked: true };
+    })().finally(() => converting.delete(key)));
+  }
+  return converting.get(key);
+}
+
+const ensurePreview = (post, file) => (file.type === 'video' ? ensureVideoPoster(post, file) : ensureHeicPreview(post, file));
+
 function convertInBackground(post) {
-  const work = Promise.all(post.files.map((f) => ensureHeicPreview(post, f)))
-    .catch((err) => console.error('HEIC conversion failed:', err.message));
+  const work = Promise.all(post.files.map((f) => ensurePreview(post, f)))
+    .catch((err) => console.error('Preview work failed:', err.message));
   try { waitUntil(work); } catch { /* not on Vercel */ }
 }
 
@@ -451,13 +501,14 @@ async function sendMedia(req, res, preview) {
   const post = await db.getPost(req.params.postId);
   let file = post && post.files.find((f) => f.id === req.params.fileId);
   if (!file || !canSee(req, post) || (preview && !hasPreview(file))) return res.status(404).end();
-  if (preview && !file.previewPathname) {
+  if (preview && (!file.previewPathname || (file.type === 'video' && !file.posterChecked))) {
     try {
-      file = await ensureHeicPreview(post, file);
+      file = await ensurePreview(post, file);
     } catch (err) {
-      console.error('HEIC conversion failed:', err.message);
+      console.error('Preview failed:', err.message);
       return res.status(404).end();
     }
+    if (!file.previewPathname) return res.status(404).end();
   }
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");
   if (preview) return storage.send(req, res, previewRefOf(file), 'image/jpeg');

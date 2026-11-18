@@ -334,6 +334,12 @@
   }
   const audioItems = (post) => post.files.filter((f) => f.type === 'audio').map((file) => ({ kind: 'audio', file }));
 
+  // A video without a cover: the browser shows its first frame instead.
+  const firstFrame = (file) => h('video', {
+    class: 'm-fg', src: `${file.url}#t=0.1`, preload: 'metadata', muted: true, playsinline: true,
+    'aria-hidden': 'true', tabindex: '-1',
+  });
+
   function renderSlide(item, index, items) {
     const { kind } = item;
     const src = kind === 'image' ? (item.file.previewUrl || item.file.url)
@@ -349,18 +355,19 @@
       slide.append(h('span', { class: 'm-audio-icon', 'aria-hidden': 'true' }, icons.audio()));
     } else if (src) {
       const fg = h('img', { class: 'm-fg', src, alt: '', loading: 'lazy', decoding: 'async' });
+      const bg = kind !== 'youtube' ? h('img', { class: 'm-bg', src, alt: '', loading: 'lazy', 'aria-hidden': 'true' }) : null;
       fg.addEventListener('error', () => {
-        slide.classList.add('broken');
-        fg.replaceWith(h('span', { class: 'm-file' }, (item.file && item.file.name) || ''));
+        bg?.remove();
+        if (kind === 'video') fg.replaceWith(firstFrame(item.file)); // no cover after all
+        else {
+          slide.classList.add('broken');
+          fg.replaceWith(h('span', { class: 'm-file' }, (item.file && item.file.name) || ''));
+        }
       }, { once: true });
-      if (kind !== 'youtube') slide.append(h('img', { class: 'm-bg', src, alt: '', loading: 'lazy', 'aria-hidden': 'true' }));
+      if (bg) slide.append(bg);
       slide.append(fg);
     } else {
-      // A video without a stored cover: its first frame shows instead.
-      slide.append(h('video', {
-        class: 'm-fg', src: `${item.file.url}#t=0.1`, preload: 'metadata', muted: true, playsinline: true,
-        'aria-hidden': 'true', tabindex: '-1',
-      }));
+      slide.append(firstFrame(item.file));
     }
     if (kind === 'video' || kind === 'youtube') slide.append(h('span', { class: 'm-play', 'aria-hidden': 'true' }, icons.play()));
     if (text) slide.append(h('span', { class: 'm-caption' }, text));
@@ -822,6 +829,7 @@
           finish(null);
         }
       }, { once: true });
+      let tries = 0;
       video.addEventListener('seeked', () => {
         try {
           const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
@@ -829,15 +837,42 @@
           const canvas = document.createElement('canvas');
           canvas.width = Math.round(video.videoWidth * scale);
           canvas.height = Math.round(video.videoHeight * scale);
-          canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          if (looksBlank(ctx, canvas.width, canvas.height)) {
+            // Some phones hand over a black frame; look a bit further in, then
+            // leave it to the server, which makes a proper cover.
+            tries += 1;
+            if (tries < 3 && video.duration > tries * 1.5) { video.currentTime = tries * 1.5; return; }
+            finish(null);
+            return;
+          }
           canvas.toBlob((blob) => finish(blob), 'image/jpeg', 0.82);
         } catch {
           finish(null);
         }
-      }, { once: true });
+      });
       video.addEventListener('error', () => finish(null), { once: true });
       video.src = url;
     });
+  }
+
+  /** True when a frame is (nearly) one flat colour, e.g. all black. */
+  function looksBlank(ctx, width, height) {
+    const { data } = ctx.getImageData(0, 0, width, height);
+    const step = Math.max(4, Math.floor(data.length / 4 / 4000)) * 4;
+    let n = 0;
+    let sum = 0;
+    let sumSq = 0;
+    for (let i = 0; i < data.length; i += step) {
+      const y = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      sum += y;
+      sumSq += y * y;
+      n++;
+    }
+    const mean = sum / n;
+    const sd = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+    return sd < 4 || (mean < 12 && sd < 8);
   }
 
   function setUploading(on) {
