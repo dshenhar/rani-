@@ -52,9 +52,37 @@ try {
 if (process.env.VERCEL && storage.kind === 'local') setupProblems.push('storage');
 if (storage.oauth && !process.env.GOOGLE_OAUTH_CLIENT_SECRET) setupProblems.push('oauth-secret');
 if (!config.adminCode) setupProblems.push('admin-code');
+// A second admin code for co-managers, set in the page settings. Only a salted
+// hash is stored, with a tag that changes with the code (see lib/auth.js).
+let extraAdminCache = { at: 0, value: null };
+async function extraAdmin({ fresh = false } = {}) {
+  if (!db) return null;
+  if (fresh || Date.now() - extraAdminCache.at > 30_000) {
+    extraAdminCache = { at: Date.now(), value: (await db.getSettings()).extraAdmin || null };
+  }
+  return extraAdminCache.value;
+}
+const hashCode = (code, salt) => crypto.scryptSync(String(code).trim().toLowerCase(), salt, 32);
+function extraAdminMatches(code, extra) {
+  if (!extra || !String(code || '').trim()) return false;
+  const expected = Buffer.from(extra.hash, 'hex');
+  const given = hashCode(code, Buffer.from(extra.salt, 'hex'));
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+const sameText = (a, b) => Boolean(a && b) && a.trim().toLowerCase() === b.trim().toLowerCase();
+
 const auth = createAuth({
-  adminCode: config.adminCode, familyCode: config.familyCode, secret: process.env.SESSION_SECRET,
+  adminCode: config.adminCode,
+  familyCode: config.familyCode,
+  secret: process.env.SESSION_SECRET,
+  extraAdminTag: async () => (await extraAdmin())?.tag || null,
 });
+
+// Shown in a window when someone opens the site; admins can change it.
+const DEFAULT_WELCOME = `איך אפשר להסביר מי זה רני? מילים לא מספיקות לתאר. רני השאיר בכל אחת ואחד מאיתנו את האור שלו - צחוק, משפט, תשומת לב אוהבת, טיפ בלתי נשכח לחיים. כאן נדליק את כל האורות יחד, כדי להתרגש, לצחוק, לבכות ולהתמלא בו שוב ושוב (רני כמובן היה מתנגד, ובכן - קפוץ לנו).
+
+מוזמנות ומוזמנים להעלות סרטונים, תמונות, הודעות, הקלטות או לכתוב באופן חופשי - לעיני כל, או רק לעיני משפחת אלון האהובה.`;
+const WELCOME_MAX = 4000;
 
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const newId = () => crypto.randomBytes(12).toString('base64url');
@@ -283,6 +311,7 @@ function convertInBackground(post) {
 const publicSettings = (s) => ({
   name: s.name,
   about: s.about || '',
+  welcome: s.welcome ?? DEFAULT_WELCOME, // '' = no welcome window
   coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
 });
 
@@ -331,14 +360,20 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
+// Paragraphs (blank lines) and line breaks of the welcome text, as HTML.
+const welcomeHtml = (text) => String(text || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
+  .map((p) => `<p>${p.split('\n').map(escapeHtml).join('<br>')}</p>`).join('\n');
+
 function renderIndex(req, settings) {
   const s = publicSettings(settings);
   const origin = `${req.protocol}://${req.get('host')}`;
   const ogImage = s.coverUrl ? `<meta property="og:image" content="${escapeHtml(origin + s.coverUrl)}">` : '';
+  // Replacement functions, so a "$" in the text is not read as a pattern.
   return indexTemplate
     .replaceAll('{{NAME}}', escapeHtml(s.name))
     .replace('{{NO_PHOTO}}', s.coverUrl ? '' : 'no-photo')
-    .replace('{{ABOUT}}', escapeHtml(s.about || ''))
+    .replace('{{ABOUT}}', () => escapeHtml(s.about || ''))
+    .replace('{{WELCOME}}', () => welcomeHtml(s.welcome))
     .replace('{{ABOUT_HIDDEN}}', s.about ? '' : 'hidden')
     .replace('{{COVER}}', s.coverUrl ? `src="${escapeHtml(s.coverUrl)}"` : 'hidden')
     .replace('{{OG_IMAGE}}', ogImage)
@@ -418,6 +453,7 @@ app.get('/api/state', async (req, res) => {
     settings: publicSettings(settings),
     posts: posts.filter((p) => canSee(req, p)).map((p) => serializePost(p, req)),
     drive, // admin only: is a Google account connected for the files?
+    extraAdminSet: req.role === 'admin' ? Boolean(settings.extraAdmin) : undefined,
   });
 });
 
@@ -657,11 +693,17 @@ app.delete('/api/posts/:id', async (req, res) => {
 
 // ----- access -----
 
-app.post('/api/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 40 }), express.json({ limit: '2kb' }), (req, res) => {
-  const role = auth.roleForCode(req.body?.code);
-  if (!role) return res.status(401).json({ error: 'הקוד שגוי' });
-  auth.setRole(req, res, role);
-  res.json({ role });
+app.post('/api/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 40 }), express.json({ limit: '2kb' }), async (req, res) => {
+  const code = req.body?.code;
+  const role = auth.roleForCode(code);
+  if (role) {
+    auth.setRole(req, res, role);
+    return res.json({ role });
+  }
+  const extra = await extraAdmin({ fresh: true });
+  if (!extraAdminMatches(code, extra)) return res.status(401).json({ error: 'הקוד שגוי' });
+  auth.setRole(req, res, `admin-${extra.tag}`);
+  res.json({ role: 'admin' });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -712,6 +754,22 @@ app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (r
     name: cleanText(body.name, 120) || config.defaultName,
     about: cleanText(body.about, 2000),
   };
+  if ('welcome' in body) changes.welcome = cleanText(body.welcome, WELCOME_MAX);
+  let newTag = null;
+  const extraCode = String(body.extraAdminCode || '').trim();
+  if (extraCode) {
+    if (extraCode.length < 6 || extraCode.length > 100) {
+      return res.status(400).json({ error: 'קוד האדמין צריך להיות באורך 6 תווים לפחות.' });
+    }
+    if (sameText(extraCode, config.familyCode) || sameText(extraCode, config.adminCode)) {
+      return res.status(400).json({ error: 'הקוד הזה כבר בשימוש. נא לבחור קוד אחר.' });
+    }
+    const salt = crypto.randomBytes(16);
+    newTag = crypto.randomBytes(8).toString('hex');
+    changes.extraAdmin = { salt: salt.toString('hex'), hash: hashCode(extraCode, salt).toString('hex'), tag: newTag };
+  } else if (body.removeExtraAdmin) {
+    changes.extraAdmin = null;
+  }
   const old = (await db.getSettings()).cover;
   if (body.coverPathname) {
     const pathname = String(body.coverPathname);
@@ -731,7 +789,12 @@ app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (r
   }
   const settings = await db.updateSettings(changes);
   if (old && 'cover' in changes) storage.remove([old.ref || old.pathname]).catch(() => {});
-  res.json({ settings: publicSettings(settings) });
+  if ('extraAdmin' in changes) {
+    extraAdminCache = { at: 0, value: null };
+    // Whoever changed the code with it stays signed in.
+    if (newTag && req.signedInVia === 'extra-admin') auth.setRole(req, res, `admin-${newTag}`);
+  }
+  res.json({ settings: publicSettings(settings), extraAdminSet: Boolean(settings.extraAdmin) });
 });
 
 // ----- download everything (family and admin), in parts -----

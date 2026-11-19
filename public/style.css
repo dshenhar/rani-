@@ -88,7 +88,7 @@ button, input, textarea { font: inherit; color: inherit; }
   color: var(--muted);
   cursor: pointer;
 }
-.gear svg { width: 22px; height: 22px; }
+.gear img { width: 22px; height: 22px; display: block; } /* the Mabua logo */
 .gear:hover, .gear[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
 .gear-menu {
   position: absolute;
@@ -517,6 +517,54 @@ button, input, textarea { font: inherit; color: inherit; }
 
 dialog { color: var(--text); }
 dialog::backdrop { background: rgba(20, 18, 16, .45); }
+
+.field-note { margin: 0; font-size: .88rem; color: var(--muted); }
+.field > .link { align-self: flex-start; }
+
+/* Welcome window: 90% of a phone screen, 75% on computers. On phones the
+   words are sized (app.js) to fill it without scrolling. */
+.welcome {
+  width: 90vw;
+  height: 90vh;
+  height: 90dvh;
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  background: var(--surface);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .25);
+  overflow: hidden;
+}
+.welcome[open] { display: flex; flex-direction: column; }
+.welcome-close { position: absolute; top: 8px; left: 8px; }
+.welcome-text {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 50px 22px 6px;
+  font-family: var(--serif);
+  font-size: 20px;
+  line-height: 1.6;
+}
+.welcome-text:focus { outline: none; }
+.welcome-inner { margin-block: auto; } /* centred while it fits */
+.welcome-inner p { margin: 0 0 .85em; }
+.welcome-inner p:last-child { margin-bottom: 0; }
+.welcome-actions {
+  display: flex;
+  justify-content: center;
+  padding: 10px 22px calc(18px + env(safe-area-inset-bottom));
+}
+.welcome-actions .btn { min-width: 170px; }
+@media (min-width: 760px) {
+  .welcome { width: 75vw; height: 75vh; height: 75dvh; }
+  .welcome-text { padding: 56px 7% 8px; font-size: clamp(22px, 1.9vw, 30px); line-height: 1.7; }
+  .welcome-inner { max-width: 30em; margin-inline: auto; }
+  .welcome-actions { padding-bottom: 28px; }
+}
 
 .sheet {
   width: min(560px, calc(100vw - 24px));

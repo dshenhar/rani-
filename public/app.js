@@ -159,6 +159,7 @@
   }
 
   function render() {
+    renderWelcome();
     renderHero();
     renderFilters();
     renderFeed();
@@ -212,6 +213,7 @@
     const member = state.role === 'family' || state.role === 'admin';
     const admin = state.role === 'admin';
     $('#open-login').hidden = member || !state.loginEnabled;
+    $('#open-admin-login').hidden = admin || !state.loginEnabled;
     $('#open-settings').hidden = !admin;
     $('#export-open').hidden = !member;
     $('#logout').hidden = !member;
@@ -449,6 +451,57 @@
   function renderPost(post) {
     return phoneQuery.matches ? renderPhonePost(post) : renderDesktopPost(post);
   }
+
+  // ---------- welcome window ----------
+
+  const welcome = $('#welcome');
+  const welcomeText = $('#welcome-text');
+  const WELCOME_SEEN = 'memorial-welcome-seen';
+
+  function renderWelcome() {
+    const paragraphs = (state.settings.welcome || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+    welcomeText.replaceChildren(h('div', { class: 'welcome-inner' },
+      paragraphs.map((p) => h('p', null, p.split('\n').flatMap((line, i) => (i ? [h('br'), line] : [line]))))));
+    if (welcome.open) {
+      if (paragraphs.length) fitWelcome(); else welcome.close();
+    }
+  }
+
+  // Phones: the largest size at which the words fill the window without
+  // scrolling. Computers: the size from the stylesheet, smaller only if needed.
+  function fitWelcome() {
+    if (!welcome.open) return;
+    welcomeText.style.fontSize = '';
+    const max = phoneQuery.matches ? 40 : parseFloat(getComputedStyle(welcomeText).fontSize);
+    const fits = (px) => {
+      welcomeText.style.fontSize = `${px}px`;
+      return welcomeText.scrollHeight <= welcomeText.clientHeight + 1;
+    };
+    if (fits(max)) return;
+    let lo = 12;
+    let hi = max;
+    while (hi - lo > 0.25) {
+      const mid = (lo + hi) / 2;
+      if (fits(mid)) lo = mid; else hi = mid;
+    }
+    fits(Math.floor(lo * 4) / 4);
+  }
+
+  // Once per visit: not again on reloads in the same tab.
+  function maybeShowWelcome() {
+    try {
+      if (sessionStorage.getItem(WELCOME_SEEN)) return;
+    } catch { /* storage blocked: show it anyway */ }
+    if (!welcomeText.textContent.trim()) return;
+    welcome.showModal();
+    fitWelcome();
+  }
+  welcome.addEventListener('close', () => {
+    try { sessionStorage.setItem(WELCOME_SEEN, '1'); } catch { /* fine */ }
+  });
+  welcome.addEventListener('click', (e) => { if (e.target === welcome) welcome.close(); });
+  window.addEventListener('resize', () => requestAnimationFrame(fitWelcome));
+  document.fonts?.ready.then(fitWelcome);
 
   // ---------- dialogs (shared) ----------
 
@@ -1108,11 +1161,14 @@
 
   const loginDialog = $('#login');
 
-  $('#open-login').addEventListener('click', () => {
+  function openLogin(title) {
+    $('#login-title').textContent = title;
     showError($('#login-error'), '');
     $('#login-code').value = '';
     loginDialog.showModal();
-  });
+  }
+  $('#open-login').addEventListener('click', () => openLogin('כניסת משפחה'));
+  $('#open-admin-login').addEventListener('click', () => openLogin('כניסת אדמין'));
 
   async function signIn(code) {
     await api('/api/login', {
@@ -1147,6 +1203,20 @@
   const coverPreview = $('#s-cover-preview');
   let pendingCover = null;
   let removeCover = false;
+  let removeExtraAdmin = false;
+
+  function showAdminCodeState(isSet) {
+    $('#s-admin-note').textContent = isSet
+      ? 'יש קוד פעיל. אפשר לכתוב כאן קוד חדש במקומו. מי שנכנס עם הקוד הקודם יצטרך את החדש.'
+      : 'מי שייכנס עם הקוד יוכל לנהל את האתר, כמו המנהל הראשי.';
+    $('#s-admin-remove').hidden = !isSet;
+  }
+
+  $('#s-admin-remove').addEventListener('click', () => {
+    removeExtraAdmin = true;
+    $('#s-admin-remove').hidden = true;
+    $('#s-admin-note').textContent = 'הקוד יבוטל בשמירה, ומי שנכנס איתו ייצא.';
+  });
 
   function showCoverPreview(src) {
     coverPreview.hidden = !src;
@@ -1158,6 +1228,10 @@
     showError($('#settings-error'), '');
     $('#s-name').value = state.settings.name;
     $('#s-about').value = state.settings.about || '';
+    $('#s-welcome').value = state.settings.welcome || '';
+    $('#s-admin-code').value = '';
+    removeExtraAdmin = false;
+    showAdminCodeState(state.extraAdminSet);
     pendingCover = null;
     removeCover = false;
     showCoverPreview(state.settings.coverUrl);
@@ -1185,7 +1259,10 @@
     const button = e.submitter || $('#settings-form button[type="submit"]');
     button.disabled = true;
     try {
-      const changes = { name: $('#s-name').value, about: $('#s-about').value };
+      const changes = { name: $('#s-name').value, about: $('#s-about').value, welcome: $('#s-welcome').value };
+      const adminCode = $('#s-admin-code').value.trim();
+      if (adminCode) changes.extraAdminCode = adminCode;
+      else if (removeExtraAdmin) changes.removeExtraAdmin = true;
       if (pendingCover) {
         const resized = await imagePreview(pendingCover);
         const body = resized || pendingCover;
@@ -1323,6 +1400,8 @@
     const code = params.get('k');
     const editLink = params.get('edit');
     state.driveFlash = params.get('drive');
+    // Not when coming back to edit a memory or from connecting Google Drive.
+    if (!editLink && !state.driveFlash) maybeShowWelcome();
     if (code || editLink || state.driveFlash) {
       for (const p of ['k', 'edit', 'drive']) params.delete(p);
       const rest = params.toString();
