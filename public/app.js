@@ -159,7 +159,6 @@
   }
 
   function render() {
-    renderWelcome();
     renderHero();
     renderFilters();
     renderFeed();
@@ -175,8 +174,9 @@
     document.title = name;
     $('#name').textContent = name; // read by screen readers; the handwritten name is what people see
     const aboutEl = $('#about');
-    aboutEl.textContent = about || '';
-    aboutEl.hidden = !about;
+    const paragraphs = (about || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+    aboutEl.replaceChildren(...paragraphs.map((p) => h('p', null, p)));
+    aboutEl.hidden = !paragraphs.length;
     const img = $('#portrait');
     if (coverUrl) {
       if (img.getAttribute('src') !== coverUrl) img.src = coverUrl;
@@ -187,6 +187,7 @@
     }
     $('#portrait-wrap').classList.toggle('no-photo', !coverUrl);
     renderDriveBox();
+    fitPortrait();
   }
 
   // Admin only: a notice when Google Drive is not connected (or just was).
@@ -263,14 +264,10 @@
     return set;
   }
 
+  // All the tabs, always, also before anything of that kind was added.
   function renderFilters() {
     const nav = $('#filters');
-    const counts = {};
-    for (const post of state.posts) for (const c of categories(post)) counts[c] = (counts[c] || 0) + 1;
-    const available = FILTERS.filter(([key]) => key === 'all' || counts[key]);
-    if (!available.some(([key]) => key === state.filter)) state.filter = 'all';
-    nav.classList.toggle('few', available.length < 3); // phones hide the tabs then; the computer window keeps them
-    nav.replaceChildren(...available.map(([key, label]) => h('button', {
+    nav.replaceChildren(...FILTERS.map(([key, label]) => h('button', {
       type: 'button',
       class: 'chip',
       'aria-pressed': String(state.filter === key),
@@ -286,9 +283,12 @@
     if (feed.scrollHeight > feed.clientHeight) feed.scrollTop = 0; // computers: the window scrolls
   }
 
+  const EMPTY_TAB = { text: 'עדיין אין סיפורים', image: 'עדיין אין תמונות', video: 'עדיין אין סרטונים', audio: 'עדיין אין הקלטות' };
+
   function renderFeed() {
     const posts = state.posts.filter((p) => state.filter === 'all' || categories(p).has(state.filter));
-    $('#feed').replaceChildren(...posts.map(renderPost));
+    const empty = !posts.length && EMPTY_TAB[state.filter];
+    $('#feed').replaceChildren(...(empty ? [h('p', { class: 'feed-empty' }, empty)] : posts.map(renderPost)));
     requestAnimationFrame(afterLayout);
   }
 
@@ -452,56 +452,27 @@
     return phoneQuery.matches ? renderPhonePost(post) : renderDesktopPost(post);
   }
 
-  // ---------- welcome window ----------
+  // ---------- computers: the side column fits the screen ----------
 
-  const welcome = $('#welcome');
-  const welcomeText = $('#welcome-text');
-  const WELCOME_SEEN = 'memorial-welcome-seen';
-
-  function renderWelcome() {
-    const paragraphs = (state.settings.welcome || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-    welcomeText.replaceChildren(h('div', { class: 'welcome-inner' },
-      paragraphs.map((p) => h('p', null, p.split('\n').flatMap((line, i) => (i ? [h('br'), line] : [line]))))));
-    if (welcome.open) {
-      if (paragraphs.length) fitWelcome(); else welcome.close();
-    }
+  // The photo, the words under it and the add button share the column
+  // without scrolling: only the photo (with its fade) gets smaller if needed.
+  const wideQuery = matchMedia('(min-width: 1000px) and (min-height: 560px)');
+  function fitPortrait() {
+    const wrap = $('#portrait-wrap');
+    wrap.style.width = '';
+    if (!wideQuery.matches || wrap.classList.contains('no-photo')) return;
+    const side = $('.side');
+    const cs = getComputedStyle(side);
+    const used = [...side.children].reduce((sum, el) => sum + el.getBoundingClientRect().height, 0)
+      + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    const over = used - side.clientHeight;
+    if (over <= 0) return;
+    const box = wrap.getBoundingClientRect();
+    wrap.style.width = `${Math.max(180, box.width - over * (box.width / box.height))}px`;
   }
-
-  // Phones: the largest size at which the words fill the window without
-  // scrolling. Computers: the size from the stylesheet, smaller only if needed.
-  function fitWelcome() {
-    if (!welcome.open) return;
-    welcomeText.style.fontSize = '';
-    const max = phoneQuery.matches ? 40 : parseFloat(getComputedStyle(welcomeText).fontSize);
-    const fits = (px) => {
-      welcomeText.style.fontSize = `${px}px`;
-      return welcomeText.scrollHeight <= welcomeText.clientHeight + 1;
-    };
-    if (fits(max)) return;
-    let lo = 12;
-    let hi = max;
-    while (hi - lo > 0.25) {
-      const mid = (lo + hi) / 2;
-      if (fits(mid)) lo = mid; else hi = mid;
-    }
-    fits(Math.floor(lo * 4) / 4);
-  }
-
-  // Once per visit: not again on reloads in the same tab.
-  function maybeShowWelcome() {
-    try {
-      if (sessionStorage.getItem(WELCOME_SEEN)) return;
-    } catch { /* storage blocked: show it anyway */ }
-    if (!welcomeText.textContent.trim()) return;
-    welcome.showModal();
-    fitWelcome();
-  }
-  welcome.addEventListener('close', () => {
-    try { sessionStorage.setItem(WELCOME_SEEN, '1'); } catch { /* fine */ }
-  });
-  welcome.addEventListener('click', (e) => { if (e.target === welcome) welcome.close(); });
-  window.addEventListener('resize', () => requestAnimationFrame(fitWelcome));
-  document.fonts?.ready.then(fitWelcome);
+  wideQuery.addEventListener('change', fitPortrait);
+  window.addEventListener('resize', () => requestAnimationFrame(fitPortrait));
+  document.fonts?.ready.then(fitPortrait);
 
   // ---------- dialogs (shared) ----------
 
@@ -1228,7 +1199,6 @@
     showError($('#settings-error'), '');
     $('#s-name').value = state.settings.name;
     $('#s-about').value = state.settings.about || '';
-    $('#s-welcome').value = state.settings.welcome || '';
     $('#s-admin-code').value = '';
     removeExtraAdmin = false;
     showAdminCodeState(state.extraAdminSet);
@@ -1259,7 +1229,7 @@
     const button = e.submitter || $('#settings-form button[type="submit"]');
     button.disabled = true;
     try {
-      const changes = { name: $('#s-name').value, about: $('#s-about').value, welcome: $('#s-welcome').value };
+      const changes = { name: $('#s-name').value, about: $('#s-about').value };
       const adminCode = $('#s-admin-code').value.trim();
       if (adminCode) changes.extraAdminCode = adminCode;
       else if (removeExtraAdmin) changes.removeExtraAdmin = true;
@@ -1400,8 +1370,6 @@
     const code = params.get('k');
     const editLink = params.get('edit');
     state.driveFlash = params.get('drive');
-    // Not when coming back to edit a memory or from connecting Google Drive.
-    if (!editLink && !state.driveFlash) maybeShowWelcome();
     if (code || editLink || state.driveFlash) {
       for (const p of ['k', 'edit', 'drive']) params.delete(p);
       const rest = params.toString();

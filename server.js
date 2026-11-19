@@ -78,11 +78,6 @@ const auth = createAuth({
   extraAdminTag: async () => (await extraAdmin())?.tag || null,
 });
 
-// Shown in a window when someone opens the site; admins can change it.
-const DEFAULT_WELCOME = `איך אפשר להסביר מי זה רני? מילים לא מספיקות לתאר. רני השאיר בכל אחת ואחד מאיתנו את האור שלו - צחוק, משפט, תשומת לב אוהבת, טיפ בלתי נשכח לחיים. כאן נדליק את כל האורות יחד, כדי להתרגש, לצחוק, לבכות ולהתמלא בו שוב ושוב (רני כמובן היה מתנגד, ובכן - קפוץ לנו).
-
-מוזמנות ומוזמנים להעלות סרטונים, תמונות, הודעות, הקלטות או לכתוב באופן חופשי - לעיני כל, או רק לעיני משפחת אלון האהובה.`;
-const WELCOME_MAX = 4000;
 
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const newId = () => crypto.randomBytes(12).toString('base64url');
@@ -311,7 +306,6 @@ function convertInBackground(post) {
 const publicSettings = (s) => ({
   name: s.name,
   about: s.about || '',
-  welcome: s.welcome ?? DEFAULT_WELCOME, // '' = no welcome window
   coverUrl: s.cover ? `/cover?v=${s.cover.v}` : null,
 });
 
@@ -360,9 +354,9 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
-// Paragraphs (blank lines) and line breaks of the welcome text, as HTML.
-const welcomeHtml = (text) => String(text || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
-  .map((p) => `<p>${p.split('\n').map(escapeHtml).join('<br>')}</p>`).join('\n');
+// Paragraphs (separated by a blank line) of the words under the photo.
+const paragraphsHtml = (text) => String(text || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
+  .map((p) => `<p>${escapeHtml(p)}</p>`).join('');
 
 function renderIndex(req, settings) {
   const s = publicSettings(settings);
@@ -372,8 +366,7 @@ function renderIndex(req, settings) {
   return indexTemplate
     .replaceAll('{{NAME}}', escapeHtml(s.name))
     .replace('{{NO_PHOTO}}', s.coverUrl ? '' : 'no-photo')
-    .replace('{{ABOUT}}', () => escapeHtml(s.about || ''))
-    .replace('{{WELCOME}}', () => welcomeHtml(s.welcome))
+    .replace('{{ABOUT}}', () => paragraphsHtml(s.about))
     .replace('{{ABOUT_HIDDEN}}', s.about ? '' : 'hidden')
     .replace('{{COVER}}', s.coverUrl ? `src="${escapeHtml(s.coverUrl)}"` : 'hidden')
     .replace('{{OG_IMAGE}}', ogImage)
@@ -754,7 +747,6 @@ app.post('/api/settings', requireAdmin, express.json({ limit: '8kb' }), async (r
     name: cleanText(body.name, 120) || config.defaultName,
     about: cleanText(body.about, 2000),
   };
-  if ('welcome' in body) changes.welcome = cleanText(body.welcome, WELCOME_MAX);
   let newTag = null;
   const extraCode = String(body.extraAdminCode || '').trim();
   if (extraCode) {

@@ -194,13 +194,21 @@ button, input, textarea { font: inherit; color: inherit; }
   border: 0;
 }
 
+/* The words under the photo (set in the page settings). Above the photo's
+   glow, which reaches a little below it. */
 .about {
-  white-space: pre-wrap;
+  position: relative;
+  z-index: 3;
   unicode-bidi: plaintext;
-  max-width: 34em;
-  margin: 14px auto 0;
-  line-height: 1.75;
+  max-width: 30em;
+  margin: 12px auto 0;
+  padding: 0 4px;
+  font-family: var(--serif);
+  font-size: 16.5px;
+  line-height: 1.7;
 }
+.about p { margin: 0; white-space: pre-line; }
+.about p + p { margin-top: .7em; }
 
 .drive-box {
   margin: 12px auto 0;
@@ -306,7 +314,7 @@ button, input, textarea { font: inherit; color: inherit; }
   overflow-x: auto;
   scrollbar-width: none;
 }
-.filters.few { display: none; }
+.feed-empty { margin: 28px 0; text-align: center; color: var(--muted); }
 .filters::-webkit-scrollbar { display: none; }
 
 .chip {
@@ -520,51 +528,6 @@ dialog::backdrop { background: rgba(20, 18, 16, .45); }
 
 .field-note { margin: 0; font-size: .88rem; color: var(--muted); }
 .field > .link { align-self: flex-start; }
-
-/* Welcome window: 90% of a phone screen, 75% on computers. On phones the
-   words are sized (app.js) to fill it without scrolling. */
-.welcome {
-  width: 90vw;
-  height: 90vh;
-  height: 90dvh;
-  max-width: none;
-  max-height: none;
-  padding: 0;
-  border: 0;
-  border-radius: 22px;
-  background: var(--surface);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, .25);
-  overflow: hidden;
-}
-.welcome[open] { display: flex; flex-direction: column; }
-.welcome-close { position: absolute; top: 8px; left: 8px; }
-.welcome-text {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-  padding: 50px 22px 6px;
-  font-family: var(--serif);
-  font-size: 20px;
-  line-height: 1.6;
-}
-.welcome-text:focus { outline: none; }
-.welcome-inner { margin-block: auto; } /* centred while it fits */
-.welcome-inner p { margin: 0 0 .85em; }
-.welcome-inner p:last-child { margin-bottom: 0; }
-.welcome-actions {
-  display: flex;
-  justify-content: center;
-  padding: 10px 22px calc(18px + env(safe-area-inset-bottom));
-}
-.welcome-actions .btn { min-width: 170px; }
-@media (min-width: 760px) {
-  .welcome { width: 75vw; height: 75vh; height: 75dvh; }
-  .welcome-text { padding: 56px 7% 8px; font-size: clamp(22px, 1.9vw, 30px); line-height: 1.7; }
-  .welcome-inner { max-width: 30em; margin-inline: auto; }
-  .welcome-actions { padding-bottom: 28px; }
-}
 
 .sheet {
   width: min(560px, calc(100vw - 24px));
@@ -972,6 +935,8 @@ input:focus, textarea:focus { outline: none; border-color: var(--focus); }
   }
   .hero { padding: 0; }
   .portrait-wrap { width: clamp(270px, 52vh, 500px); max-width: 100%; margin-bottom: 8px; }
+  /* Fixed by screen height, so it stays readable; the photo makes room (app.js). */
+  .about { max-width: 26em; margin-top: 6px; font-size: clamp(15px, 1.9vh, 17px); line-height: 1.6; }
   .compose-bar { padding: 28px 0 0; }
 
   .panel {
@@ -984,7 +949,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--focus); }
     overflow: hidden;
     box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 12px 40px rgba(0, 0, 0, .06);
   }
-  .filters, .filters.few {
+  .filters {
     display: flex;
     flex: none;
     justify-content: flex-start;
